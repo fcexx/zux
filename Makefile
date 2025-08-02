@@ -11,8 +11,8 @@ BUILDDIR = build
 OBJDIR = $(BUILDDIR)/obj
 BINDIR = $(BUILDDIR)/bin
 
-ASM_SOURCES = $(wildcard $(SRCDIR)/*.asm)
-C_SOURCES = $(wildcard $(SRCDIR)/*.cpp)
+ASM_SOURCES = $(wildcard $(SRCDIR)/*.asm) $(wildcard $(SRCDIR)/*/*.asm)
+C_SOURCES = $(wildcard $(SRCDIR)/*.cpp) $(wildcard $(SRCDIR)/*/*.cpp) $(wildcard $(SRCDIR)/*/*/*.cpp)
 
 ASM_OBJECTS = $(patsubst $(SRCDIR)/%.asm, $(OBJDIR)/%.o, $(ASM_SOURCES))
 C_OBJECTS = $(patsubst $(SRCDIR)/%.cpp, $(OBJDIR)/%.o, $(C_SOURCES))
@@ -26,7 +26,7 @@ all: $(BINDIR)/solarImg solar.img
 
 $(BINDIR)/solarImg: $(OBJECTS)
 	@mkdir -p $(dir $@)
-	$(LD) -n -o $@ -Ttext 0x100000 $(OBJECTS)
+	$(LD) -n -o $@ -T linker.ld $(OBJECTS)
 
 hda/boot/solarImg: $(BINDIR)/solarImg
 	@mkdir -p $(dir $@)
@@ -74,7 +74,7 @@ clean:
 	sudo rm -rf $(BUILDDIR) solar.img
 
 run:
-	qemu-system-x86_64 -drive format=raw,file=solar.img -m 256M -debugcon stdio
+	qemu-system-x86_64 -drive format=raw,file=solar.img -m 512M -debugcon stdio
 
 debug:
-	qemu-system-x86_64 -drive format=raw,file=solar.img -m 256M -s -S
+	qemu-system-x86_64 -drive format=raw,file=solar.img -m 512M -s -S -debugcon stdio
