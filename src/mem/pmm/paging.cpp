@@ -1,5 +1,5 @@
-#include "paging.h"
-#include "debug.h"
+#include <paging.h>
+#include <debug.h>
 
 // Page tables
 static page_table_t page_table_l4 __attribute__((aligned(4096)));

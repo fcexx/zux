@@ -1,5 +1,5 @@
-#include "pic.h"
-#include "debug.h"
+#include <pic.h>
+#include <debug.h>
 
 static void (*irq_handlers[16])() = {nullptr};
 

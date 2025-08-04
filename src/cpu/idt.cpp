@@ -1,6 +1,6 @@
-#include "idt.h"
-#include "debug.h"
-#include "pic.h"
+#include <idt.h>
+#include <debug.h>
+#include <pic.h>
 
 static void (*irq_handlers[16])() = {nullptr};
 static void (*isr_handlers[256])(cpu_registers_t*) = {nullptr};
@@ -9,26 +9,42 @@ static idt_entry_t idt[256];
 static idt_ptr_t idt_ptr;
 
 extern "C" void isr_dispatch(cpu_registers_t* regs) {
-    if (isr_handlers[regs->interrupt_number]) {
-        isr_handlers[regs->interrupt_number](regs);
-    } else {
-        if (regs->interrupt_number < 32) {
-            PrintfQEMU("Exception: %s\n", exception_messages[regs->interrupt_number]);
-            PrintfQEMU("Error code: 0x%lx\n", regs->error_code);
-            PrintfQEMU("RIP: 0x%lx\n", regs->rip);
-            PrintfQEMU("RSP: 0x%lx\n", regs->rsp);
-            for (;;);
+    // Handle IRQ (hardware interrupts) first
+    if (regs->interrupt_number >= 32 && regs->interrupt_number <= 47) {
+        uint8_t irq = regs->interrupt_number - 32;
+        
+        // Call handler if exists
+        if (isr_handlers[regs->interrupt_number]) {
+            isr_handlers[regs->interrupt_number](regs);
         } else {
-            PrintfQEMU("Unknown interrupt %d (0x%x)\n", regs->interrupt_number, regs->interrupt_number);
-            PrintfQEMU("RIP: 0x%lx, RSP: 0x%lx\n", regs->rip, regs->rsp);
+            PrintfQEMU("Unhandled IRQ %d\n", irq);
+        }
+        
+        // Send EOI to PIC
+        pic_send_eoi(irq);
+        return;
+    }
+    
+    // Handle exceptions (interrupts 0-31)
+    if (regs->interrupt_number < 32) {
+        PrintfQEMU("Exception: %s\n", exception_messages[regs->interrupt_number]);
+        PrintfQEMU("Error code: 0x%lx\n", regs->error_code);
+        PrintfQEMU("RIP: 0x%lx\n", regs->rip);
+        PrintfQEMU("RSP: 0x%lx\n", regs->rsp);
+        
+        // Call handler if exists
+        if (isr_handlers[regs->interrupt_number]) {
+            isr_handlers[regs->interrupt_number](regs);
+        } else {
+            PrintfQEMU("Halted due to unhandled exception\n");
             for (;;);
         }
+        return;
     }
-
-    if (regs->interrupt_number >= 32 && regs->interrupt_number <= 47) {
-        PrintfQEMU("IRQ %d (vector %d) handled\n", regs->interrupt_number - 32, regs->interrupt_number);
-        pic_send_eoi(regs->interrupt_number - 32);
-    }
+    
+    // Unknown interrupt
+    PrintfQEMU("Unknown interrupt %d (0x%x)\n", regs->interrupt_number, regs->interrupt_number);
+    PrintfQEMU("RIP: 0x%lx, RSP: 0x%lx\n", regs->rip, regs->rsp);
 }
 
 void idt_set_gate(uint8_t num, uint64_t handler, uint16_t selector, uint8_t flags) {
@@ -54,5 +70,4 @@ void idt_init() {
     }
     
     asm volatile("lidt %0" : : "m"(idt_ptr));
-    PrintQEMU("IDT initialized\n");
 }

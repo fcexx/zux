@@ -13,11 +13,13 @@ BINDIR = $(BUILDDIR)/bin
 
 ASM_SOURCES = $(wildcard $(SRCDIR)/*.asm) $(wildcard $(SRCDIR)/*/*.asm)
 C_SOURCES = $(wildcard $(SRCDIR)/*.cpp) $(wildcard $(SRCDIR)/*/*.cpp) $(wildcard $(SRCDIR)/*/*/*.cpp)
+LIBC_SOURCES = $(wildcard libc/*.cpp)
 
 ASM_OBJECTS = $(patsubst $(SRCDIR)/%.asm, $(OBJDIR)/%.o, $(ASM_SOURCES))
 C_OBJECTS = $(patsubst $(SRCDIR)/%.cpp, $(OBJDIR)/%.o, $(C_SOURCES))
+LIBC_OBJECTS = $(patsubst libc/%.cpp, $(OBJDIR)/%.o, $(LIBC_SOURCES))
 
-OBJECTS = $(ASM_OBJECTS) $(C_OBJECTS)
+OBJECTS = $(ASM_OBJECTS) $(C_OBJECTS) $(LIBC_OBJECTS)
 
 
 .PHONY: all clean run
@@ -67,6 +69,10 @@ $(OBJDIR)/%.o: $(SRCDIR)/%.asm
 	$(AS) -f elf64 $< -o $@
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.cpp
+	@mkdir -p $(dir $@)
+	$(CC) -c $< -o $@ -std=c++17 -ffreestanding -fno-exceptions -fno-rtti -Wall -Wextra -g -Iinclude
+
+$(OBJDIR)/%.o: libc/%.cpp
 	@mkdir -p $(dir $@)
 	$(CC) -c $< -o $@ -std=c++17 -ffreestanding -fno-exceptions -fno-rtti -Wall -Wextra -g -Iinclude
 

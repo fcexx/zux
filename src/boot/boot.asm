@@ -202,7 +202,7 @@ long_mode_start:
     mov rdi, rsi                ; multiboot2_info_ptr -> rdi
     mov rsi, rdi                ; multiboot2_magic -> rsi
     mov rsi, rdi                ; multiboot2_magic -> rsi
-
+    cli
     ; Вызов ядра
     call kernel_main
 
