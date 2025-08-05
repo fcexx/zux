@@ -2,6 +2,7 @@
 #define VBETTY_H
 
 #include <stdint.h>
+#include <spinlock.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -27,6 +28,8 @@ int kprintf(const char* format, ...);
 uint32_t vbetty_get_cursor_x();
 uint32_t vbetty_get_cursor_y();
 void vbetty_set_cursor_pos(uint32_t x, uint32_t y);
+
+extern spinlock_t vbelock;
 
 #ifdef __cplusplus
 }

@@ -4,29 +4,31 @@
 #include <idt.h>
 #include <vbedbuff.h>
 #include <vbetty.h>
+#include <thread.h>
 
 // Global variables
 volatile uint64_t pit_ticks = 0;
-volatile uint32_t pit_frequency = 100; // Default 100 Hz
+volatile uint32_t pit_frequency = 1000; // Default 100 Hz
 
 // PIT handler - called on IRQ 0
 void pit_handler(cpu_registers_t* regs) {
     pit_ticks++;
+    
     if (pit_ticks % (pit_frequency / 50) == 0) { // More frequent updates for better responsiveness
         if (vbedbuff_is_initialized()) {
             vbedbuff_swap();
         }
     }
+
+    // Убираем обновление курсора из таймера - курсор должен гореть постоянно
+    // if (pit_ticks % 250 == 0) {
+    //     if (vbedbuff_is_initialized()) {
+    //         vbetty_update_cursor();
+    //     }
+    // }
     
-    // Simple cursor blink ever
-    // y 250 ticks (250ms at 1000Hz)
-    if (pit_ticks % 250 == 0) {
-        static bool cursor_state = false;
-        cursor_state = !cursor_state;
-        
-        if (cursor_state) vbetty_force_draw_cursor(); // Show cursor
-        else vbetty_force_hide_cursor(); // Hide cursor
-    }
+    if (init) thread_schedule();
+    
     
     // Send EOI to PIC
     pic_send_eoi(0);
@@ -36,8 +38,9 @@ void pit_handler(cpu_registers_t* regs) {
 void pit_init() {
     PrintfQEMU("Initializing PIT timer...\n");
     
-    // Set default frequency (100 Hz)
+    // Set default frequency (1000 Hz)
     pit_set_frequency(1000);
+    PrintfQEMU("DEBUG: pit_frequency = %u\n", pit_frequency);
     // Set up PIT handler for IRQ 0
     idt_set_handler(32, pit_handler); // IRQ 0 = vector 32
     
@@ -105,4 +108,8 @@ uint64_t pit_get_ticks() {
 // Get time in milliseconds since boot
 uint64_t pit_get_time_ms() {
     return (pit_ticks * 1000) / pit_frequency;
+}
+
+uint64_t pit_get_frequency() {
+    return pit_frequency;
 }

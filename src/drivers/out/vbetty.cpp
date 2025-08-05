@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <stdarg.h>
 #include <heap.h>
+#include <spinlock.h>
 
 // Console dimensions
 static uint32_t console_width_chars;
@@ -23,12 +24,14 @@ static uint32_t current_bg_color = 0x000000; // Black
 // Cursor state
 static bool cursor_visible = false; // Start with cursor invisible
 static uint64_t cursor_blink_counter = 0;
-static const uint64_t cursor_blink_interval = 25; // 25 ticks at 100Hz = 250ms
+static const uint64_t cursor_blink_interval = 5; // 5 ticks at 1000Hz = 5ms (much faster blinking)
 
 // Screen buffer to store characters and their colors
 static char* screen_buffer = nullptr;
 static uint32_t* fg_color_buffer = nullptr;
 static uint32_t* bg_color_buffer = nullptr;
+
+spinlock_t vbelock;
 
 // Initialize VBETTY console
 void vbetty_init() {
@@ -43,11 +46,23 @@ void vbetty_init() {
         }
     }
 
-    console_width_chars = vbe_get_width() / 8;  // 8 pixels per char width
-    console_height_chars = vbe_get_height() / 8; // 8 pixels per char height
+    console_width_chars = 800 / 8;  // 8 pixels per char width
+    console_height_chars = 600 / 8; // 8 pixels per char height
+
+    // Проверяем, что размеры разумные
+    if (console_width_chars == 0 || console_height_chars == 0) {
+        PrintfQEMU("ERROR: Invalid console dimensions: %ux%u\n", console_width_chars, console_height_chars);
+        console_width_chars = 80;  // Fallback values
+        console_height_chars = 25;
+    }
+    
+    PrintfQEMU("VBETTY: Console dimensions: %ux%u chars\n", console_width_chars, console_height_chars);
 
     vbetty_cursor_x = 0;
     vbetty_cursor_y = 0;
+    
+    // Проверяем, что курсор в правильной позиции
+    PrintfQEMU("VBETTY: Initial cursor position: (%u,%u)\n", vbetty_cursor_x, vbetty_cursor_y);
     
     // Allocate screen buffers
     size_t buffer_size = console_width_chars * console_height_chars;
@@ -69,6 +84,10 @@ void vbetty_init() {
         PrintfQEMU("VBETTY: screen_buffer=%p, fg_color_buffer=%p, bg_color_buffer=%p\n", 
                    screen_buffer, fg_color_buffer, bg_color_buffer);
     }
+    
+    // Показываем курсор после инициализации
+    vbetty_show_cursor();
+    PrintfQEMU("VBETTY: Cursor enabled\n");
 }
 
 // Set foreground color
@@ -257,7 +276,6 @@ void vbetty_put_char(char c) {
     
     vbetty_cursor_x++;
     // Let PIT timer handle all screen updates for maximum performance
-
 }
 
 // Print a string to the console
@@ -289,56 +307,45 @@ void vbetty_set_cursor_pos(uint32_t x, uint32_t y) {
 
 // Update cursor blink state
 void vbetty_update_cursor() {
-    static int debug_counter = 0;
-    debug_counter++;
-    
     // Check if buffers are initialized
     if (!screen_buffer || !fg_color_buffer || !bg_color_buffer) {
         return;
     }
     
-    cursor_blink_counter++;
+    // Курсор всегда горит - убираем мигание
+    cursor_visible = true;
     
-    if (cursor_blink_counter >= cursor_blink_interval) {
-        cursor_visible = !cursor_visible;
-        cursor_blink_counter = 0;
+    // Redraw the character at cursor position
+    if (vbetty_cursor_x < console_width_chars && vbetty_cursor_y < console_height_chars) {
+        size_t buffer_index = vbetty_cursor_y * console_width_chars + vbetty_cursor_x;
+        uint32_t start_x = vbetty_cursor_x * 8;
+        uint32_t start_y = vbetty_cursor_y * 8;
         
-        // Redraw the character at cursor position
-        if (vbetty_cursor_x < console_width_chars && vbetty_cursor_y < console_height_chars) {
-            size_t buffer_index = vbetty_cursor_y * console_width_chars + vbetty_cursor_x;
-            uint32_t start_x = vbetty_cursor_x * 8;
-            uint32_t start_y = vbetty_cursor_y * 8;
-            
-            char c = screen_buffer[buffer_index];
-            uint32_t fg_color = fg_color_buffer[buffer_index];
-            uint32_t bg_color = bg_color_buffer[buffer_index];
-            
-            unsigned char* glyph = font8x8_basic[(uint8_t)c];
-            
-            for (uint32_t y = 0; y < 8; y++) {
-                for (uint32_t x = 0; x < 8; x++) {
-                    uint32_t pixel_x = start_x + x;
-                    uint32_t pixel_y = start_y + y;
-                    
-                    if (pixel_x < vbe_get_width() && pixel_y < vbe_get_height()) {
-                        uint32_t color;
-                        if (cursor_visible) {
-                            // Inverted colors: swap foreground and background
-                            color = ((glyph[y] >> x) & 0x1) ? bg_color : fg_color;
-                        } else {
-                            // Normal colors
-                            color = ((glyph[y] >> x) & 0x1) ? fg_color : bg_color;
-                        }
-                        vbedbuff_pixel(pixel_x, pixel_y, color);
-                    }
+        char c = screen_buffer[buffer_index];
+        uint32_t fg_color = fg_color_buffer[buffer_index];
+        uint32_t bg_color = bg_color_buffer[buffer_index];
+        
+        // Если позиция пустая, используем пробел
+        if (c == 0) {
+            c = ' ';
+            fg_color = current_fg_color;
+            bg_color = current_bg_color;
+        }
+        
+        unsigned char* glyph = font8x8_basic[(uint8_t)c];
+        
+        for (uint32_t y = 0; y < 8; y++) {
+            for (uint32_t x = 0; x < 8; x++) {
+                uint32_t pixel_x = start_x + x;
+                uint32_t pixel_y = start_y + y;
+                
+                if (pixel_x < vbe_get_width() && pixel_y < vbe_get_height()) {
+                    // Курсор всегда горит - используем инвертированные цвета
+                    uint32_t color = ((glyph[y] >> x) & 0x1) ? bg_color : fg_color;
+                    vbedbuff_pixel(pixel_x, pixel_y, color);
                 }
             }
         }
-    }
-    
-    if (debug_counter % 1000 == 0) {
-        PrintfQEMU("Cursor update: counter=%llu, visible=%d, pos=(%u,%u)\n", 
-                   cursor_blink_counter, cursor_visible, vbetty_cursor_x, vbetty_cursor_y);
     }
 }
 
@@ -346,6 +353,32 @@ void vbetty_update_cursor() {
 void vbetty_show_cursor() {
     cursor_visible = true;
     cursor_blink_counter = 0; // Reset counter when showing cursor
+    
+    // Immediately draw cursor at current position
+    if (vbetty_cursor_x < console_width_chars && vbetty_cursor_y < console_height_chars) {
+        size_t buffer_index = vbetty_cursor_y * console_width_chars + vbetty_cursor_x;
+        uint32_t start_x = vbetty_cursor_x * 8;
+        uint32_t start_y = vbetty_cursor_y * 8;
+        
+        char c = screen_buffer[buffer_index];
+        uint32_t fg_color = fg_color_buffer[buffer_index];
+        uint32_t bg_color = bg_color_buffer[buffer_index];
+        
+        unsigned char* glyph = font8x8_basic[(uint8_t)c];
+        
+        for (uint32_t y = 0; y < 8; y++) {
+            for (uint32_t x = 0; x < 8; x++) {
+                uint32_t pixel_x = start_x + x;
+                uint32_t pixel_y = start_y + y;
+                
+                if (pixel_x < vbe_get_width() && pixel_y < vbe_get_height()) {
+                    // Draw inverted colors for cursor (show cursor immediately)
+                    uint32_t color = ((glyph[y] >> x) & 0x1) ? bg_color : fg_color;
+                    vbedbuff_pixel(pixel_x, pixel_y, color);
+                }
+            }
+        }
+    }
 }
 
 // Hide cursor
@@ -355,14 +388,17 @@ void vbetty_hide_cursor() {
 
 // Force draw cursor at current position
 void vbetty_force_draw_cursor() {
-    
     if (!screen_buffer || !fg_color_buffer || !bg_color_buffer) {
         PrintfQEMU("ERROR: Buffers not initialized!\n");
         return;
     }
     
     if (vbetty_cursor_x >= console_width_chars || vbetty_cursor_y >= console_height_chars) {
-        PrintfQEMU("ERROR: Cursor position out of bounds!\n");
+        PrintfQEMU("ERROR: Cursor position out of bounds! (%u,%u) >= (%u,%u)\n", 
+                   vbetty_cursor_x, vbetty_cursor_y, console_width_chars, console_height_chars);
+        // Сбрасываем курсор в безопасную позицию
+        vbetty_cursor_x = 0;
+        vbetty_cursor_y = 0;
         return;
     }
     
@@ -374,6 +410,13 @@ void vbetty_force_draw_cursor() {
     uint32_t fg_color = fg_color_buffer[buffer_index];
     uint32_t bg_color = bg_color_buffer[buffer_index];
     
+    // Если позиция пустая, используем пробел
+    if (c == 0) {
+        c = ' ';
+        fg_color = current_fg_color;
+        bg_color = current_bg_color;
+    }
+    
     unsigned char* glyph = font8x8_basic[(uint8_t)c];
     
     for (uint32_t y = 0; y < 8; y++) {
@@ -382,7 +425,7 @@ void vbetty_force_draw_cursor() {
             uint32_t pixel_y = start_y + y;
             
             if (pixel_x < vbe_get_width() && pixel_y < vbe_get_height()) {
-                // Draw inverted colors for cursor (always inverted initially)
+                // Draw inverted colors for cursor
                 uint32_t color = ((glyph[y] >> x) & 0x1) ? bg_color : fg_color;
                 vbedbuff_pixel(pixel_x, pixel_y, color);
             }
@@ -393,24 +436,39 @@ void vbetty_force_draw_cursor() {
 // Force hide cursor by redrawing normal character
 void vbetty_force_hide_cursor() {
     if (!screen_buffer || !fg_color_buffer || !bg_color_buffer) {
-        PrintfQEMU("ERROR: Buffers not initialized in hide cursor!\n");
         return;
     }
     
     if (vbetty_cursor_x >= console_width_chars || vbetty_cursor_y >= console_height_chars) {
-        PrintfQEMU("ERROR: Cursor position out of bounds in hide cursor!\n");
         return;
     }
     
     size_t buffer_index = vbetty_cursor_y * console_width_chars + vbetty_cursor_x;
-    uint32_t start_x = vbetty_cursor_x * 8;
-    uint32_t start_y = vbetty_cursor_y * 8;
-    
     char c = screen_buffer[buffer_index];
     uint32_t fg_color = fg_color_buffer[buffer_index];
     uint32_t bg_color = bg_color_buffer[buffer_index];
     
+    // Если позиция пустая, используем пробел
+    if (c == 0) {
+        c = ' ';
+        fg_color = current_fg_color;
+        bg_color = current_bg_color;
+    }
+    
+    // Сохраняем текущие цвета и позицию
+    uint32_t old_fg_color = current_fg_color;
+    uint32_t old_bg_color = current_bg_color;
+    uint32_t old_cursor_x = vbetty_cursor_x;
+    uint32_t old_cursor_y = vbetty_cursor_y;
+    
+    // Устанавливаем цвета символа
+    current_fg_color = fg_color;
+    current_bg_color = bg_color;
+    
+    // Рисуем символ нормальными цветами напрямую на экране
     unsigned char* glyph = font8x8_basic[(uint8_t)c];
+    uint32_t start_x = old_cursor_x * 8;
+    uint32_t start_y = old_cursor_y * 8;
     
     for (uint32_t y = 0; y < 8; y++) {
         for (uint32_t x = 0; x < 8; x++) {
@@ -424,6 +482,12 @@ void vbetty_force_hide_cursor() {
             }
         }
     }
+    
+    // Восстанавливаем цвета и позицию
+    current_fg_color = old_fg_color;
+    current_bg_color = old_bg_color;
+    vbetty_cursor_x = old_cursor_x;
+    vbetty_cursor_y = old_cursor_y;
 }
 
 // 16-color palette (standard console colors)
@@ -526,6 +590,8 @@ static void print_unsigned(uint32_t num, int base) {
 
 // kprintf implementation with format support and color escape sequences
 int kprintf(const char* format, ...) {
+    acquire(&vbelock);
+    
     va_list args;
     va_start(args, format);
     
@@ -630,5 +696,6 @@ int kprintf(const char* format, ...) {
     }
     
     va_end(args);
+    release(&vbelock);
     return chars_written;
 } 

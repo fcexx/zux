@@ -12,9 +12,6 @@ bool framebuffer_initialized = false;
 
 // Initialize VBE framebuffer
 void vbe_init(uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch, uint32_t bpp) {
-    PrintfQEMU("VBE init called with addr: 0x%llx, width: %u, height: %u, pitch: %u, bpp: %u\n", 
-               (unsigned long long)addr, width, height, pitch, bpp);
-    
     framebuffer_addr = (uint32_t*)addr;
     fb_width = width;
     fb_height = height;

@@ -2,8 +2,9 @@ ARCH = x86_64
 TARGET = $(ARCH)-elf
 HOST = $(ARCH)-pc-linux-gnu
 
-CC = $(TARGET)-g++
+CC = x86_64-elf-g++
 AS = nasm
+GAS = $(TARGET)-as
 LD = $(TARGET)-ld
 
 SRCDIR = src
@@ -12,14 +13,16 @@ OBJDIR = $(BUILDDIR)/obj
 BINDIR = $(BUILDDIR)/bin
 
 ASM_SOURCES = $(wildcard $(SRCDIR)/*.asm) $(wildcard $(SRCDIR)/*/*.asm)
+GAS_SOURCES = $(wildcard $(SRCDIR)/*.S) $(wildcard $(SRCDIR)/*/*.S) $(wildcard $(SRCDIR)/*/*/*.S)
 C_SOURCES = $(wildcard $(SRCDIR)/*.cpp) $(wildcard $(SRCDIR)/*/*.cpp) $(wildcard $(SRCDIR)/*/*/*.cpp)
 LIBC_SOURCES = $(wildcard libc/*.cpp)
 
 ASM_OBJECTS = $(patsubst $(SRCDIR)/%.asm, $(OBJDIR)/%.o, $(ASM_SOURCES))
+GAS_OBJECTS = $(patsubst $(SRCDIR)/%.S, $(OBJDIR)/%.o, $(GAS_SOURCES))
 C_OBJECTS = $(patsubst $(SRCDIR)/%.cpp, $(OBJDIR)/%.o, $(C_SOURCES))
 LIBC_OBJECTS = $(patsubst libc/%.cpp, $(OBJDIR)/%.o, $(LIBC_SOURCES))
 
-OBJECTS = $(ASM_OBJECTS) $(C_OBJECTS) $(LIBC_OBJECTS)
+OBJECTS = $(ASM_OBJECTS) $(GAS_OBJECTS) $(C_OBJECTS) $(LIBC_OBJECTS)
 
 
 .PHONY: all clean run
@@ -67,6 +70,10 @@ solar.img: hda/boot/solarImg hda/boot/grub/grub.cfg
 $(OBJDIR)/%.o: $(SRCDIR)/%.asm
 	@mkdir -p $(dir $@)
 	$(AS) -f elf64 $< -o $@
+
+$(OBJDIR)/%.o: $(SRCDIR)/%.S
+	@mkdir -p $(dir $@)
+	$(GAS) --64 $< -o $@
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.cpp
 	@mkdir -p $(dir $@)
