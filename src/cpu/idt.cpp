@@ -27,45 +27,40 @@ static void page_fault_handler(cpu_registers_t* regs) {
 }
 
 extern "C" void isr_dispatch(cpu_registers_t* regs) {
-    // Handle IRQ (hardware interrupts) first
-    if (regs->interrupt_number >= 32 && regs->interrupt_number <= 47) {
-        uint8_t irq = regs->interrupt_number - 32;
-        
-        // Call handler if exists
-        if (isr_handlers[regs->interrupt_number]) {
-            isr_handlers[regs->interrupt_number](regs);
+    uint8_t vec = (uint8_t)regs->interrupt_number;
+
+    // IRQ 32..47: EOI required
+    if (vec >= 32 && vec <= 47) {
+        if (isr_handlers[vec]) {
+            isr_handlers[vec](regs);
         } else {
-            PrintfQEMU("Unhandled IRQ %d\n", irq);
+            PrintfQEMU("Unhandled IRQ %d\n", vec - 32);
         }
-        
-        // Send EOI to PIC
-        pic_send_eoi(irq);
+        pic_send_eoi(vec - 32);
         return;
     }
-    
-    // Handle exceptions (interrupts 0-31)
-    if (regs->interrupt_number < 32) {
-        PrintfQEMU("Exception: %s\n", exception_messages[regs->interrupt_number]);
+
+    // Any other vector: call registered handler if present (e.g., int 0x80)
+    if (isr_handlers[vec]) {
+        isr_handlers[vec](regs);
+        return;
+    }
+
+    // Exceptions 0..31 without specific handler: print and halt
+    if (vec < 32) {
+        PrintfQEMU("Exception: %s\n", exception_messages[vec]);
         PrintfQEMU("Error code: 0x%lx\n", regs->error_code);
         PrintfQEMU("RIP: 0x%lx\n", regs->rip);
         PrintfQEMU("RSP: 0x%lx\n", regs->rsp);
-        // Dump general purpose registers for all exceptions
         PrintfQEMU("GPR: RAX=0x%llx RBX=0x%llx RCX=0x%llx RDX=0x%llx RSI=0x%llx RDI=0x%llx R8=0x%llx R9=0x%llx R10=0x%llx R11=0x%llx R12=0x%llx R13=0x%llx R14=0x%llx R15=0x%llx\n",
                    regs->rax, regs->rbx, regs->rcx, regs->rdx, regs->rsi, regs->rdi,
                    regs->r8, regs->r9, regs->r10, regs->r11, regs->r12, regs->r13, regs->r14, regs->r15);
-        
-        // Call handler if exists
-        if (isr_handlers[regs->interrupt_number]) {
-            isr_handlers[regs->interrupt_number](regs);
-        } else {
-            PrintfQEMU("Halted due to unhandled exception\n");
-            for (;;);
-        }
-        return;
+        PrintfQEMU("Halted due to unhandled exception\n");
+        for (;;);
     }
-    
-    // Unknown interrupt
-    PrintfQEMU("Unknown interrupt %d (0x%x)\n", regs->interrupt_number, regs->interrupt_number);
+
+    // Unknown vector
+    PrintfQEMU("Unknown interrupt %d (0x%x)\n", vec, vec);
     PrintfQEMU("RIP: 0x%x, RSP: 0x%x\n", regs->rip, regs->rsp);
     for (;;);
 }
@@ -87,13 +82,13 @@ void idt_set_handler(uint8_t num, void (*handler)(cpu_registers_t*)) {
 void idt_init() {
     idt_ptr.limit = sizeof(idt) - 1;
     idt_ptr.base = (uint64_t)&idt;
-    
+
     for (int i = 0; i < 256; i++) {
         idt_set_gate(i, isr_stub_table[i], 0x08, 0x8E);
     }
-    
+
     // Register detailed page fault handler
     idt_set_handler(14, page_fault_handler);
-    
+
     asm volatile("lidt %0" : : "m"(idt_ptr));
 }

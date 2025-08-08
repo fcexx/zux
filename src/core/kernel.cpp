@@ -16,6 +16,7 @@
 #include <fs_interface.h>
 #include <fat32.h>
 #include <gdt.h>
+#include <syscall.h>
 
 typedef unsigned int uint32_t;
 
@@ -173,9 +174,17 @@ void keyboard_test_thread() {
 }
 
 static void user_demo() {
-    // simple infinite loop in userspace; would do syscalls later
-
-    for(;;);
+    // call write(1, "Hello from user\n", 17) via int 0x80
+    const char* msg = "Hello from user\n";
+    register uint64_t rax asm("rax") = SYS_WRITE;
+    register uint64_t rdi asm("rdi") = 1;
+    register uint64_t rsi asm("rsi") = (uint64_t)msg;
+    register uint64_t rdx asm("rdx") = 17;
+    asm volatile ("int $0x80" : "+a"(rax) : "D"(rdi), "S"(rsi), "d"(rdx) : "rcx", "r11", "memory");
+    // exit(0)
+    rax = SYS_EXIT; rdi = 0; rsi = 0; rdx = 0;
+    asm volatile ("int $0x80" : "+a"(rax) : "D"(rdi), "S"(rsi), "d"(rdx) : "rcx", "r11", "memory");
+    for(;;) { asm volatile("hlt"); }
 }
 
 extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_ptr) {
@@ -238,6 +247,9 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
     uint64_t kstack_top = (uint64_t)kstack + 16384;
     thread_current()->kernel_stack = kstack_top;
     tss_set_rsp0(kstack_top);
+
+    // Инициализация системных вызовов (int 0x80)
+    syscall_init();
 
     asm volatile("sti");
 
