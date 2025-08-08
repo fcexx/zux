@@ -14,6 +14,7 @@ volatile uint32_t pit_frequency = 1000; // Default 100 Hz
 void pit_handler(cpu_registers_t* regs) {
     pit_ticks++;
     
+
     if (pit_ticks % (pit_frequency / 50) == 0) { // More frequent updates for better responsiveness
         if (vbedbuff_is_initialized()) {
             vbedbuff_swap();
@@ -27,11 +28,12 @@ void pit_handler(cpu_registers_t* regs) {
     //     }
     // }
     
-    if (init) thread_schedule();
+    // Вызываем планировщик реже - каждые 10 тиков (10 мс при 1000 Гц)
+    if (init && (pit_ticks % 10 == 0)) {
+        thread_schedule();
+    }
     
-    
-    // Send EOI to PIC
-    pic_send_eoi(0);
+    // EOI отправляется в isr_dispatch
 }
 
 // Initialize PIT with default frequency (100 Hz)

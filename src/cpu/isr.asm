@@ -1,3 +1,7 @@
+; Alphix kernel
+; 256 ISR stubs for x86_64
+; cpu/isr.asm
+
 BITS 64
     DEFAULT REL
 
@@ -53,33 +57,23 @@ isr%1:
     push rax            ; fake error code
     mov rax, %1
     push rax            ; interrupt number
-    mov rax, [rsp + 8 * 18]  ; RIP from stack (after pushing registers)
-    push rax            ; rip
-    mov rax, rsp
-    add rax, 8 * 20     ; RSP before interrupt
-    push rax            ; rsp
     mov rdi, rsp        ; rdi -> cpu_registers_t
     call isr_dispatch
-    add rsp, 32         ; pop rip, rsp, vector + error code
+    add rsp, 16         ; pop vector + error code
     POP_REGS
     iretq
 %endmacro
 
 %macro ISR_ERR 1
 isr%1:
-    pop rax             ; drop CPU-provided error code
+    pop rax             ; save CPU-provided error code
     PUSH_REGS
     push rax            ; real error code
     mov rax, %1
     push rax            ; interrupt number
-    mov rax, [rsp + 8 * 18]  ; RIP from stack (after pushing registers)
-    push rax            ; rip
-    mov rax, rsp
-    add rax, 8 * 20     ; RSP before interrupt
-    push rax            ; rsp
     mov rdi, rsp        ; rdi -> cpu_registers_t
     call isr_dispatch
-    add rsp, 32         ; pop rip, rsp, vector + error code
+    add rsp, 16         ; pop vector + error code
     POP_REGS
     iretq
 %endmacro

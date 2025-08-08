@@ -126,12 +126,12 @@ char* strchr(const char* str, int c) {
         return (char*)str;
     }
     
-    return nullptr;
+    return NULL;
 }
 
 // Находит последнее вхождение символа в строке
 char* strrchr(const char* str, int c) {
-    char* last = nullptr;
+    char* last = NULL;
     
     while (*str != '\0') {
         if (*str == (char)c) {
@@ -169,7 +169,7 @@ char* strstr(const char* haystack, const char* needle) {
         haystack++;
     }
     
-    return nullptr;
+    return NULL;
 }
 
 // Копирует память
@@ -328,3 +328,68 @@ int atoi(const char* str) {
     
     return sign * result;
 } 
+
+int trim(char* str) {
+    if (!str) return 0;
+    
+    // Удаляем пробелы в начале
+    while (*str == ' ' || *str == '\t' || *str == '\n' || *str == '\r') {
+        str++;
+    }
+    
+    if (*str == '\0') {
+        return 0;
+    }
+    
+    // Удаляем пробелы в конце
+    char* end = str + strlen(str) - 1;
+    while (end > str && (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r')) {
+        end--;
+    }
+    
+    *(end + 1) = '\0';
+    return 1;
+}
+
+// Реализация strtok
+static char* strtok_save = NULL;
+
+char* strtok(char* str, const char* delim) {
+    if (!str && !strtok_save) {
+        return NULL;
+    }
+    
+    if (str) {
+        strtok_save = str;
+    }
+    
+    if (!strtok_save) {
+        return NULL;
+    }
+    
+    // Пропускаем разделители в начале
+    while (*strtok_save && strchr(delim, *strtok_save)) {
+        strtok_save++;
+    }
+    
+    if (*strtok_save == '\0') {
+        strtok_save = NULL;
+        return NULL;
+    }
+    
+    char* token_start = strtok_save;
+    
+    // Ищем следующий разделитель
+    while (*strtok_save && !strchr(delim, *strtok_save)) {
+        strtok_save++;
+    }
+    
+    if (*strtok_save) {
+        *strtok_save = '\0';
+        strtok_save++;
+    } else {
+        strtok_save = NULL;
+    }
+    
+    return token_start;
+}

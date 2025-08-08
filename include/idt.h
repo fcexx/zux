@@ -2,14 +2,15 @@
 
 #include <stdint.h>
 
-struct cpu_registers_t {
-    uint64_t rsp;           // RSP before interrupt
-    uint64_t rip;           // RIP from interrupt
-    uint64_t interrupt_number;  // Interrupt number
-    uint64_t error_code;    // Error code (0 for no-error interrupts)
+typedef struct {
+    uint64_t interrupt_number;      // номер вектора прерывания
+    uint64_t error_code;    // код ошибки (или 0)
+    // Сохранённые регистры CPU
     uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
     uint64_t rdi, rsi, rbp, rbx, rdx, rcx, rax;
-};
+    // Сохранённые аппаратные значения
+    uint64_t rip, cs, rflags, rsp, ss;
+} cpu_registers_t;
 
 struct idt_entry_t {
     uint16_t offset_low;

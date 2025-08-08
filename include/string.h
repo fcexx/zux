@@ -15,6 +15,8 @@ char* strncat(char* dest, const char* src, size_t n);
 char* strchr(const char* str, int c);
 char* strrchr(const char* str, int c);
 char* strstr(const char* haystack, const char* needle);
+char* strtok(char* str, const char* delim);
+int trim(char* str);
 
 // Функции для работы с памятью
 void* memcpy(void* dest, const void* src, size_t n);
@@ -27,5 +29,6 @@ void itoa(int value, char* str, int base);
 void utoa(uint32_t value, char* str, int base);
 int atoi(const char* str);
 void reverse(char* str, size_t length);
+
 
 #endif // STRING_H

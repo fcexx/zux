@@ -21,6 +21,14 @@ memory_pool::memory_pool() : data(nullptr), next(nullptr) {
 // Small allocation size classes
 static constexpr size_t SMALL_SIZES[] = {16, 32, 64, 128, 256, 512};
 
+// Tag stored before small allocation payload to enable correct free
+struct small_alloc_tag {
+    uint32_t magic;         // 0xB16B00B5
+    uint16_t size_class;    // index into SMALL_SIZES
+    uint16_t reserved;
+};
+static constexpr uint32_t SMALL_TAG_MAGIC = 0xB16B00B5;
+
 // Constructor - initialize heap with given memory region
 HeapAllocator::HeapAllocator(void* start_addr, size_t initial_size) 
     : heap_start(nullptr), heap_end(nullptr) {
@@ -99,18 +107,21 @@ void HeapAllocator::remove_from_free_list(heap_block_header* block) {
 // Find best fit block in free list using binary search optimization
 heap_block_header* HeapAllocator::find_best_fit(size_t size) {
     size_t bucket = get_bucket_index(size);
-    PrintfQEMU("bucket index=%zu\n", bucket);
+    PrintfQEMU("[heap] find_best_fit: request=%zu bucket=%zu\n", size, bucket);
+    
+    if (bucket >= NUM_BUCKETS) {
+        bucket = NUM_BUCKETS - 1;
+    }
     
     // Search in current bucket first
     heap_block_header* best_fit = nullptr;
     size_t best_size = ~0ULL;
     
     for (heap_block_header* current = free_lists[bucket]; current; current = current->next) {
+        PrintfQEMU("[heap]  scan block=%p size=%zu free=%d\n", current, current->size, (int)current->is_free);
         if (current->size >= size && current->size < best_size) {
             best_fit = current;
             best_size = current->size;
-            
-            // Perfect fit found
             if (best_size == size) break;
         }
     }
@@ -119,22 +130,28 @@ heap_block_header* HeapAllocator::find_best_fit(size_t size) {
     if (!best_fit) {
         for (size_t i = bucket + 1; i < NUM_BUCKETS; i++) {
             if (free_lists[i]) {
+                PrintfQEMU("[heap]  fallback to bucket=%zu head=%p size=%zu\n", i, free_lists[i], free_lists[i]->size);
                 best_fit = free_lists[i];
                 break;
             }
         }
     }
     
+    PrintfQEMU("[heap] find_best_fit: result=%p size=%zu\n", best_fit, best_fit ? best_fit->size : 0ULL);
     return best_fit;
 }
 
 // Split large block if needed (optimized for minimal fragmentation)
 heap_block_header* HeapAllocator::split_block(heap_block_header* block, size_t requested_size) {
     if (!block || !validate_block(block)) return nullptr;
+    PrintfQEMU("[heap] split_block: block=%p size=%zu requested=%zu\n", block, block->size, requested_size);
     
     // Don't split if remaining size is too small
     size_t remaining_size = block->size - requested_size;
     if (remaining_size < MIN_BLOCK_SIZE + sizeof(heap_block_header)) {
+        remove_from_free_list(block);
+        block->is_free = 0;
+        PrintfQEMU("[heap] split_block: no-split, use whole block size=%zu\n", block->size);
         return block;
     }
     
@@ -160,6 +177,7 @@ heap_block_header* HeapAllocator::split_block(heap_block_header* block, size_t r
     add_to_free_list(new_block);
     
     stats.block_count++;
+    PrintfQEMU("[heap] split_block: allocated=%p size=%zu, remainder=%p size=%zu\n", block, block->size, new_block, new_block->size);
     
     return block;
 }
@@ -167,6 +185,7 @@ heap_block_header* HeapAllocator::split_block(heap_block_header* block, size_t r
 // Merge adjacent free blocks (optimized for minimal overhead)
 void HeapAllocator::merge_blocks(heap_block_header* block) {
     if (!block || !validate_block(block)) return;
+    PrintfQEMU("[heap] merge_blocks: block=%p size=%zu\n", block, block->size);
     
     // Try to merge with next block
     heap_block_header* next_block = reinterpret_cast<heap_block_header*>(
@@ -174,6 +193,7 @@ void HeapAllocator::merge_blocks(heap_block_header* block) {
     );
     
     if (next_block <= heap_end && validate_block(next_block) && next_block->is_free) {
+        PrintfQEMU("[heap]  merge with next=%p size=%zu\n", next_block, next_block->size);
         // Remove both blocks from free lists
         remove_from_free_list(block);
         remove_from_free_list(next_block);
@@ -198,6 +218,7 @@ void HeapAllocator::merge_blocks(heap_block_header* block) {
             
             if (potential_next == block) {
                 if (validate_block(prev_block) && prev_block->is_free) {
+                    PrintfQEMU("[heap]  merge with prev=%p size=%zu\n", prev_block, prev_block->size);
                     // Remove both blocks from free lists
                     remove_from_free_list(prev_block);
                     remove_from_free_list(block);
@@ -261,18 +282,23 @@ bool HeapAllocator::expand_heap(size_t additional_size) {
 // Main allocation function with small object optimization
 void* HeapAllocator::malloc(size_t size) {
     if (size == 0) return nullptr;
+    PrintfQEMU("[heap] kmalloc: size=%zu\n", size);
     
     // Use memory pool for small allocations
     if (size <= SMALL_SIZES[sizeof(SMALL_SIZES)/sizeof(SMALL_SIZES[0]) - 1]) {
-        return allocate_small(size);
+        void* p = allocate_small(size);
+        PrintfQEMU("[heap]  small-alloc: size=%zu -> %p\n", size, p);
+        return p;
     }
     
     // Find best fit block
     heap_block_header* block = find_best_fit(size);
     
     if (!block) {
+        PrintfQEMU("[heap]  expand_heap: request=%zu\n", size);
         // Try to expand heap
         if (!expand_heap(size + sizeof(heap_block_header))) {
+            PrintfQEMU("[heap]  expand_heap FAILED\n");
             return nullptr;
         }
         block = find_best_fit(size);
@@ -290,8 +316,9 @@ void* HeapAllocator::malloc(size_t size) {
         stats.peak_used = stats.current_used;
     }
     
-    // Return pointer to user data
-    return reinterpret_cast<uint8_t*>(block) + sizeof(heap_block_header);
+    void* user = reinterpret_cast<uint8_t*>(block) + sizeof(heap_block_header);
+    PrintfQEMU("[heap] kmalloc: -> %p (block=%p size=%zu)\n", user, block, block->size);
+    return user;
 }
 
 // Aligned allocation using bit manipulation
@@ -358,13 +385,23 @@ void* HeapAllocator::malloc_aligned(size_t size, size_t alignment) {
 
 // Deallocation with automatic merging
 void HeapAllocator::mfree(void* ptr) {
-    if (!ptr || !is_valid_pointer(ptr)) return;
+    if (!ptr) { PrintQEMU("[heap] kfree: null\n"); return; }
+
+    // If pointer belongs to any small-object pool, free via pool and return
+    for (memory_pool* pool = memory_pools; pool; pool = pool->next) {
+        if (ptr >= pool->data && ptr < pool->data + memory_pool::POOL_SIZE) {
+            deallocate_small(ptr);
+            return;
+        }
+    }
+    
+    if (!is_valid_pointer(ptr)) { PrintfQEMU("[heap] kfree: invalid ptr=%p\n", ptr); return; }
     
     heap_block_header* block = reinterpret_cast<heap_block_header*>(
         reinterpret_cast<uint8_t*>(ptr) - sizeof(heap_block_header)
     );
     
-    if (!validate_block(block)) return;
+    if (!validate_block(block)) { PrintfQEMU("[heap] kfree: bad magic for ptr=%p\n", ptr); return; }
     
     // Update statistics
     stats.total_freed += block->size;
@@ -372,6 +409,7 @@ void HeapAllocator::mfree(void* ptr) {
     
     // Mark as free
     block->is_free = 1;
+    PrintfQEMU("[heap] kfree: ptr=%p block=%p size=%zu\n", ptr, block, block->size);
     
     // Merge with adjacent blocks
     merge_blocks(block);
@@ -499,27 +537,26 @@ void* HeapAllocator::allocate_small(size_t size) {
     }
     
     // Create new pool
-    pool = static_cast<memory_pool*>(malloc(sizeof(memory_pool)));
-    if (!pool) return nullptr;
+    memory_pool* new_pool = static_cast<memory_pool*>(malloc(sizeof(memory_pool)));
+    if (!new_pool) return nullptr;
     
-    // Allocate pool data
-    pool->data = static_cast<uint8_t*>(malloc(memory_pool::POOL_SIZE));
-    if (!pool->data) {
-        mfree(pool);
+    // Initialize pool structure
+    *new_pool = memory_pool();
+    
+    // Allocate pool data once
+    new_pool->data = static_cast<uint8_t*>(malloc(memory_pool::POOL_SIZE));
+    if (!new_pool->data) {
+        mfree(new_pool);
         return nullptr;
     }
     
-    // Initialize pool
-    *pool = memory_pool();
-    pool->data = static_cast<uint8_t*>(malloc(memory_pool::POOL_SIZE));
-    
     // Add to pool list
-    pool->next = memory_pools;
-    memory_pools = pool;
+    new_pool->next = memory_pools;
+    memory_pools = new_pool;
     
     // Allocate from new pool
-    pool->bitmap[size_class][0] &= ~1ULL; // Mark first slot as allocated
-    return pool->data;
+    new_pool->bitmap[size_class][0] &= ~1ULL; // Mark first slot as allocated
+    return new_pool->data;
 }
 
 // Memory pool deallocation
@@ -562,11 +599,20 @@ size_t HeapAllocator::get_block_size(void* ptr) const {
 bool HeapAllocator::is_valid_pointer(void* ptr) const {
     if (!ptr) return false;
     
-    heap_block_header* block = reinterpret_cast<heap_block_header*>(
-        reinterpret_cast<uint8_t*>(ptr) - sizeof(heap_block_header)
-    );
+    // User pointer must lie strictly within heap data region [heap_mem_start, heap_mem_end)
+    uint8_t* u = reinterpret_cast<uint8_t*>(ptr);
+    if (u < heap_mem_start + sizeof(heap_block_header) || u >= heap_mem_end) {
+        return false;
+    }
     
-    return block >= heap_start && block <= heap_end && validate_block(block);
+    heap_block_header* block = reinterpret_cast<heap_block_header*>(u - sizeof(heap_block_header));
+    
+    uint8_t* b = reinterpret_cast<uint8_t*>(block);
+    if (b < heap_mem_start || b + sizeof(heap_block_header) > heap_mem_end) {
+        return false;
+    }
+    
+    return validate_block(block);
 }
 
 void HeapAllocator::get_stats(heap_stats* stats_out) const {

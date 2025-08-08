@@ -46,8 +46,8 @@ void vbetty_init() {
         }
     }
 
-    console_width_chars = 800 / 8;  // 8 pixels per char width
-    console_height_chars = 600 / 8; // 8 pixels per char height
+    console_width_chars = 640 / 8;  // 8 pixels per char width
+    console_height_chars = 480 / 8; // 8 pixels per char height
 
     // Проверяем, что размеры разумные
     if (console_width_chars == 0 || console_height_chars == 0) {
@@ -200,6 +200,7 @@ void vbetty_put_char(char c) {
     
     // Handle special characters
     if (c == '\n') {
+        vbetty_force_hide_cursor();
         vbetty_cursor_x = 0;
         vbetty_cursor_y++;
         
@@ -212,11 +213,13 @@ void vbetty_put_char(char c) {
     }
     
     if (c == '\r') {
+        vbetty_force_hide_cursor();
         vbetty_cursor_x = 0;
         return;
     }
     
     if (c == '\b') {
+        vbetty_force_hide_cursor();
         if (vbetty_cursor_x > 0) {
             vbetty_cursor_x--;
         } else if (vbetty_cursor_y > 0) {
@@ -233,6 +236,7 @@ void vbetty_put_char(char c) {
     
     // Check bounds
     if (vbetty_cursor_x >= console_width_chars) {
+        vbetty_force_hide_cursor();
         vbetty_cursor_x = 0;
         vbetty_cursor_y++;
         
@@ -245,6 +249,7 @@ void vbetty_put_char(char c) {
     
     // Check bounds before drawing
     if (vbetty_cursor_x >= console_width_chars || vbetty_cursor_y >= console_height_chars) {
+        vbetty_force_hide_cursor();
         vbetty_cursor_x++;
         return;
     }
@@ -297,6 +302,8 @@ uint32_t vbetty_get_cursor_y() {
 
 // Set cursor position
 void vbetty_set_cursor_pos(uint32_t x, uint32_t y) {
+    // Сначала стираем старый курсор
+    vbetty_force_hide_cursor();
     if (x < console_width_chars) {
         vbetty_cursor_x = x;
     }
@@ -565,12 +572,21 @@ static void print_number(int num, int base) {
 }
 
 // Helper function to print an unsigned number
-static void print_unsigned(uint32_t num, int base) {
+static void print_unsigned(uint32_t num, int base, int width = 0, bool zero_pad = false) {
     char buffer[32];
     char* ptr = buffer + 31;
     *ptr = '\0';
     
     if (num == 0) {
+        if (width > 0) {
+            for (int i = 0; i < width - 1; i++) {
+                if (zero_pad) {
+                    vbetty_put_char('0');
+                } else {
+                    vbetty_put_char(' ');
+                }
+            }
+        }
         vbetty_put_char('0');
         return;
     }
@@ -583,6 +599,17 @@ static void print_unsigned(uint32_t num, int base) {
             *--ptr = 'a' + (digit - 10);
         }
         num /= base;
+    }
+    
+    int len = strlen(ptr);
+    if (width > len) {
+        for (int i = 0; i < width - len; i++) {
+            if (zero_pad) {
+                vbetty_put_char('0');
+            } else {
+                vbetty_put_char(' ');
+            }
+        }
     }
     
     vbetty_print(ptr);
@@ -600,7 +627,7 @@ int kprintf(const char* format, ...) {
     
     while (*ptr) {
         if (*ptr == '<' && *(ptr + 1) == '(') {
-            // Color escape sequence: <(bg_fg)>
+            // Color escape sequence: <(bg_fg)>text
             ptr += 2; // Skip '<('
             
             char color_pair[3] = {0};
@@ -620,6 +647,8 @@ int kprintf(const char* format, ...) {
                     
                     // Apply background and foreground colors
                     parse_color_pair(color_pair);
+                    
+                    // Continue processing the text after the color sequence
                     continue;
                 }
             }
@@ -627,6 +656,22 @@ int kprintf(const char* format, ...) {
         
         if (*ptr == '%') {
             ptr++; // Skip '%'
+            
+            // Parse width and zero-pad flags
+            int width = 0;
+            bool zero_pad = false;
+            
+            // Check for zero-pad flag
+            if (*ptr == '0') {
+                zero_pad = true;
+                ptr++;
+            }
+            
+            // Parse width
+            while (*ptr >= '0' && *ptr <= '9') {
+                width = width * 10 + (*ptr - '0');
+                ptr++;
+            }
             
             switch (*ptr) {
                 case 'd':
@@ -638,20 +683,20 @@ int kprintf(const char* format, ...) {
                 }
                 case 'u': {
                     uint32_t num = va_arg(args, uint32_t);
-                    print_unsigned(num, 10);
+                    print_unsigned(num, 10, width, zero_pad);
                     chars_written++;
                     break;
                 }
                 case 'x':
                 case 'X': {
                     uint32_t num = va_arg(args, uint32_t);
-                    print_unsigned(num, 16);
+                    print_unsigned(num, 16, width, zero_pad);
                     chars_written++;
                     break;
                 }
                 case 'o': {
                     uint32_t num = va_arg(args, uint32_t);
-                    print_unsigned(num, 8);
+                    print_unsigned(num, 8, width, zero_pad);
                     chars_written++;
                     break;
                 }
@@ -698,4 +743,11 @@ int kprintf(const char* format, ...) {
     va_end(args);
     release(&vbelock);
     return chars_written;
+} 
+
+// Ensure cursor is at the beginning of a new line
+void vbetty_ensure_newline() {
+    if (vbetty_cursor_x != 0) {
+        vbetty_put_char('\n');
+    }
 } 

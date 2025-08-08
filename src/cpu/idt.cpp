@@ -8,6 +8,24 @@ static void (*isr_handlers[256])(cpu_registers_t*) = {nullptr};
 static idt_entry_t idt[256];
 static idt_ptr_t idt_ptr;
 
+static void page_fault_handler(cpu_registers_t* regs) {
+    unsigned long long cr2;
+    asm volatile("mov %%cr2, %0" : "=r"(cr2));
+    unsigned long long err = regs->error_code;
+    int p = (err & 1) != 0;          // 0: non-present, 1: protection
+    int wr = (err & 2) != 0;         // 0: read, 1: write
+    int us = (err & 4) != 0;         // 0: supervisor, 1: user
+    int rsvd = (err & 8) != 0;       // reserved bit violation
+    int id = (err & 16) != 0;        // instruction fetch (if supported)
+    PrintfQEMU("PAGE FAULT: cr2=0x%x err=0x%x [P=%d W/R=%d U/S=%d RSVD=%d I/D=%d]\n", cr2, err, p, wr, us, rsvd, id);
+    PrintfQEMU("RIP=0x%x CS=0x%x RFLAGS=0x%x RSP=0x%x SS=0x%x\n", regs->rip, regs->cs, regs->rflags, regs->rsp, regs->ss);
+    PrintfQEMU("RAX=0x%x RBX=0x%x RCX=0x%x RDX=0x%x RSI=0x%x RDI=0x%x\n",
+               regs->rax, regs->rbx, regs->rcx, regs->rdx, regs->rsi, regs->rdi);
+    PrintfQEMU("R8=0x%x R9=0x%x R10=0x%x R11=0x%x R12=0x%x R13=0x%x R14=0x%x R15=0x%x\n",
+               regs->r8, regs->r9, regs->r10, regs->r11, regs->r12, regs->r13, regs->r14, regs->r15);
+    for (;;);
+}
+
 extern "C" void isr_dispatch(cpu_registers_t* regs) {
     // Handle IRQ (hardware interrupts) first
     if (regs->interrupt_number >= 32 && regs->interrupt_number <= 47) {
@@ -31,6 +49,10 @@ extern "C" void isr_dispatch(cpu_registers_t* regs) {
         PrintfQEMU("Error code: 0x%lx\n", regs->error_code);
         PrintfQEMU("RIP: 0x%lx\n", regs->rip);
         PrintfQEMU("RSP: 0x%lx\n", regs->rsp);
+        // Dump general purpose registers for all exceptions
+        PrintfQEMU("GPR: RAX=0x%llx RBX=0x%llx RCX=0x%llx RDX=0x%llx RSI=0x%llx RDI=0x%llx R8=0x%llx R9=0x%llx R10=0x%llx R11=0x%llx R12=0x%llx R13=0x%llx R14=0x%llx R15=0x%llx\n",
+                   regs->rax, regs->rbx, regs->rcx, regs->rdx, regs->rsi, regs->rdi,
+                   regs->r8, regs->r9, regs->r10, regs->r11, regs->r12, regs->r13, regs->r14, regs->r15);
         
         // Call handler if exists
         if (isr_handlers[regs->interrupt_number]) {
@@ -44,7 +66,8 @@ extern "C" void isr_dispatch(cpu_registers_t* regs) {
     
     // Unknown interrupt
     PrintfQEMU("Unknown interrupt %d (0x%x)\n", regs->interrupt_number, regs->interrupt_number);
-    PrintfQEMU("RIP: 0x%lx, RSP: 0x%lx\n", regs->rip, regs->rsp);
+    PrintfQEMU("RIP: 0x%x, RSP: 0x%x\n", regs->rip, regs->rsp);
+    for (;;);
 }
 
 void idt_set_gate(uint8_t num, uint64_t handler, uint16_t selector, uint8_t flags) {
@@ -68,6 +91,9 @@ void idt_init() {
     for (int i = 0; i < 256; i++) {
         idt_set_gate(i, isr_stub_table[i], 0x08, 0x8E);
     }
+    
+    // Register detailed page fault handler
+    idt_set_handler(14, page_fault_handler);
     
     asm volatile("lidt %0" : : "m"(idt_ptr));
 }

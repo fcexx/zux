@@ -21,6 +21,7 @@ void vbetty_show_cursor();
 void vbetty_hide_cursor();
 void vbetty_force_draw_cursor();
 void vbetty_force_hide_cursor();
+void vbetty_ensure_newline();
 
 // kprintf function with format support and color escape sequences
 int kprintf(const char* format, ...);

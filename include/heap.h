@@ -47,6 +47,9 @@ public:
     heap_block_header* free_lists[NUM_BUCKETS];
     heap_block_header* heap_start;
     heap_block_header* heap_end;
+    // Raw heap memory span (start inclusive, end exclusive)
+    uint8_t* heap_mem_start;
+    uint8_t* heap_mem_end;
     
     // Memory pools for small allocations
     memory_pool* memory_pools;
@@ -59,7 +62,11 @@ public:
     // Optimized size class calculation using bit manipulation
     static inline size_t get_bucket_index(size_t size) {
         if (size < MIN_BLOCK_SIZE) size = MIN_BLOCK_SIZE;
-        return __builtin_clzll(0) - __builtin_clzll(size - 1);
+        // compute floor(log2(size-1)) in a defined way
+        unsigned long long x = static_cast<unsigned long long>(size - 1);
+        const size_t bits = sizeof(unsigned long long) * 8;
+        size_t leading = __builtin_clzll(x);
+        return (bits - 1) - leading;
     }
     
     // Merge adjacent free blocks

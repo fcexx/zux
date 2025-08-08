@@ -65,26 +65,29 @@ static volatile bool alt_pressed = false;
 // Добавить символ в буфер
 static void add_to_buffer(char c) {
     acquire(&keyboard_lock);
-    
     if (buffer_count < KEYBOARD_BUFFER_SIZE) {
         keyboard_buffer[buffer_tail] = c;
         buffer_tail = (buffer_tail + 1) % KEYBOARD_BUFFER_SIZE;
         buffer_count++;
+        // PrintfQEMU("BUFFER: added '%c', count=%d\n", c, buffer_count);
+    } else {
+        PrintfQEMU("BUFFER: full, dropped '%c'\n", c);
     }
-    
     release(&keyboard_lock);
 }
 
 // Получить символ из буфера
 static char get_from_buffer() {
     char c = 0;
-    
     acquire(&keyboard_lock);
     
     if (buffer_count > 0) {
         c = keyboard_buffer[buffer_head];
         buffer_head = (buffer_head + 1) % KEYBOARD_BUFFER_SIZE;
         buffer_count--;
+        // PrintfQEMU("BUFFER: got '%c', count=%d\n", c, buffer_count);
+    } else {
+        PrintfQEMU("BUFFER: empty\n");
     }
     
     release(&keyboard_lock);
@@ -114,6 +117,7 @@ extern "C" void keyboard_handler(cpu_registers_t* regs) {
         }
     } else {
         // Клавиша нажата
+        
         switch (scancode) {
             case 0x2A: // Left Shift
             case 0x36: // Right Shift
@@ -168,7 +172,6 @@ extern "C" void keyboard_handler(cpu_registers_t* regs) {
                 break;
         }
     }
-    
     pic_send_eoi(1);
 }
 
@@ -195,16 +198,12 @@ void ps2_keyboard_init() {
 
 // Получить символ (блокирующая функция, как в Unix)
 char kgetc() {
-    char c;
-    
-    // Ждем, пока в буфере появится символ
-    while (buffer_count == 0) {
-        // Блокируем текущий поток
-        thread_yield();
+    // Простая проверка - если нет символов, возвращаем 0
+    if (buffer_count == 0) {
+        return 0;
     }
     
-    c = get_from_buffer();
-    return c;
+    return get_from_buffer();
 }
 
 // Проверить, есть ли доступные символы (неблокирующая)
@@ -229,6 +228,13 @@ char* kgets(char* buffer, int max_length) {
     
     while (1) {
         char c = kgetc();
+        // PrintfQEMU("kgets got char: %d\n", c);
+        
+        if (c == 0) {
+            // Нет символов - ждем немного
+            thread_schedule();
+            continue;
+        }
         
         if (c == '\n') {
             vbetty_force_hide_cursor();

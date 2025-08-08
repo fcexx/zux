@@ -1,13 +1,14 @@
 #include <thread.h>
 #include <heap.h>
+#include <debug.h>
 #include <string.h>
 #include <pit.h>
 #include <vbetty.h>
 #include <context.h>
 
 #define MAX_THREADS 32
-static thread_t* threads[MAX_THREADS];
-static int thread_count = 0;
+thread_t* threads[MAX_THREADS];
+int thread_count = 0;
 static thread_t* current = NULL;
 int init = 0;
 static thread_t main_thread;
@@ -31,7 +32,20 @@ static void thread_trampoline(void) {
     void (*entry)(void);
     __asm__ __volatile__("movq %%r12, %0" : "=r"(entry)); // entry = r12
     entry();
-    for (;;) __asm__("hlt");
+    
+    // Поток завершился - помечаем как завершенный
+    thread_t* self = thread_current();
+    if (self) {
+        self->state = THREAD_TERMINATED;
+    }
+    
+    // Переключаемся на другой поток
+    thread_yield();
+    
+    // На всякий случай - если что-то пошло не так
+    for (;;) {
+        asm volatile("hlt");
+    }
 }
 
 thread_t* thread_create(void (*entry)(void), const char* name) {
@@ -41,8 +55,10 @@ thread_t* thread_create(void (*entry)(void), const char* name) {
     memset(t, 0, sizeof(thread_t));
     t->kernel_stack = (uint64_t)kmalloc(8192 + 16) + 8192;
     uint64_t* stack = (uint64_t*)t->kernel_stack;
-    stack[-1] = (uint64_t)thread_trampoline; // ret пойдёт на trampoline
-    t->context.rsp = (uint64_t)&stack[-1];
+    // Ensure 16-byte alignment for the stack pointer before ret
+    uint64_t sp = ((uint64_t)&stack[-1]) & ~0xFULL;
+    *((uint64_t*)sp) = (uint64_t)thread_trampoline; // ret пойдёт на trampoline
+    t->context.rsp = sp;
     t->context.r12 = (uint64_t)entry; // entry передаётся через r12
     t->context.rflags = 0x202;
     t->state = THREAD_READY;
@@ -66,9 +82,11 @@ void thread_stop(int pid) {
     for (int i = 0; i < thread_count; ++i) {
         if (threads[i] && threads[i]->tid == pid && threads[i]->state != THREAD_TERMINATED) {
             threads[i]->state = THREAD_TERMINATED;
+            kprintf("thread_stop: stopped thread %d (%s)\n", pid, threads[i]->name);
             return;
         }
     }
+    kprintf("thread_stop: thread %d not found or already terminated\n", pid);
 }
 
 void thread_block(int pid) {
@@ -102,25 +120,28 @@ void thread_schedule() {
         }
     }
     
+    // Ищем следующий готовый поток
     int next = (current->tid + 1) % thread_count;
     for (int i = 0; i < thread_count; ++i) {
         int idx = (next + i) % thread_count;
-        if (threads[idx]->state == THREAD_READY) {
+        if (threads[idx] && threads[idx]->state == THREAD_READY && threads[idx]->state != THREAD_TERMINATED) {
             thread_t* prev = current;
             current = threads[idx];
             current->state = THREAD_RUNNING;
             
             // Не меняем состояние предыдущего потока, если он спит
-            if (prev->state != THREAD_SLEEPING) {
+            if (prev->state != THREAD_SLEEPING && prev->state != THREAD_TERMINATED) {
                 prev->state = THREAD_READY;
             }
             
             context_switch(&prev->context, &current->context);
-            // После возврата из context_switch поток снова активен
-            current->state = THREAD_RUNNING;
             return;
         }
     }
+    
+    // Если нет готовых потоков, возвращаемся к idle
+        current = &main_thread;
+        current->state = THREAD_RUNNING;
 }
 
 void thread_unblock(int pid) {
