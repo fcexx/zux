@@ -41,7 +41,7 @@ void iothread_init() {
 static void io_worker_thread() {
     while (true) {
         io_request_t* request = nullptr;
-
+        
         acquire(&io_lock);
         if (pending_queue) {
             request = pending_queue;
@@ -49,10 +49,10 @@ static void io_worker_thread() {
             if (request) request->next = nullptr;
         }
         release(&io_lock);
-
+        
         if (request) {
             process_io_request(request);
-
+            
             acquire(&io_lock);
             // push to head is fine for completed; consumer takes specific id
             request->next = completed_queue;
@@ -90,10 +90,10 @@ static void process_io_request(io_request_t* request) {
 // Добавить I/O запрос в очередь (FIFO)
 int iothread_schedule_request(io_op_type_t type, uint8_t device_id, uint32_t offset, uint8_t* buffer, uint32_t size) {
     if (!iothread_initialized) return -1;
-
+    
     io_request_t* request = (io_request_t*)kmalloc(sizeof(io_request_t));
     if (!request) return -1;
-
+    
     request->type = type;
     request->device_id = device_id;
     request->offset = offset;
@@ -102,12 +102,12 @@ int iothread_schedule_request(io_op_type_t type, uint8_t device_id, uint32_t off
     request->requesting_thread = thread_current();
     request->status = 0; // pending
     request->next = nullptr;
-
+    
     acquire(&io_lock);
     request->id = ++request_count;
     // вставка в хвост для FIFO
     if (!pending_queue) {
-        pending_queue = request;
+    pending_queue = request;
     } else {
         io_request_t* tail = pending_queue;
         while (tail->next) tail = tail->next;
@@ -115,19 +115,19 @@ int iothread_schedule_request(io_op_type_t type, uint8_t device_id, uint32_t off
     }
     int rid = request->id;
     release(&io_lock);
-
+    
     return rid;
 }
 
 // Ждать завершения конкретной I/O операции по id
 int iothread_wait_completion(int request_id) {
     if (!iothread_initialized || request_id <= 0) return -1;
-
+    
     while (true) {
         acquire(&io_lock);
         io_request_t* request = completed_queue;
         io_request_t* prev = nullptr;
-
+        
         while (request) {
             if (request->id == request_id && request->status != 0) {
                 // удаляем из очереди завершённых
@@ -142,7 +142,7 @@ int iothread_wait_completion(int request_id) {
             request = request->next;
         }
         release(&io_lock);
-
+        
         // уступаем процессор, чтобы IO-поток поработал
         thread_yield();
     }
@@ -151,7 +151,7 @@ int iothread_wait_completion(int request_id) {
 // Проверить число готовых операций
 int iothread_check_completed() {
     if (!iothread_initialized) return 0;
-
+    
     acquire(&io_lock);
     int count = 0;
     for (io_request_t* r = completed_queue; r; r = r->next) {
@@ -164,11 +164,11 @@ int iothread_check_completed() {
 // Получить завершенную операцию (любую)
 io_request_t* iothread_get_completed() {
     if (!iothread_initialized) return nullptr;
-
+    
     acquire(&io_lock);
     io_request_t* request = completed_queue;
     io_request_t* prev = nullptr;
-
+    
     while (request) {
         if (request->status != 0) {
             if (prev) prev->next = request->next;

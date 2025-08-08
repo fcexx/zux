@@ -10,6 +10,7 @@
 thread_t* threads[MAX_THREADS];
 int thread_count = 0;
 static thread_t* current = NULL;
+static thread_t* current_user = NULL; // регистрируемый юзер-процесс
 int init = 0;
 static thread_t main_thread;
 
@@ -19,6 +20,7 @@ void thread_init() {
     main_thread.state = THREAD_RUNNING;
     main_thread.tid = 0;
     main_thread.sleep_until = 0;
+    for (int i=0;i<THREAD_MAX_FD;i++) main_thread.fds[i]=nullptr;
     current = &main_thread;
     threads[0] = &main_thread;
     thread_count = 1;
@@ -53,6 +55,7 @@ thread_t* thread_create(void (*entry)(void), const char* name) {
     thread_t* t = (thread_t*)kmalloc(sizeof(thread_t));
     if (!t) return NULL;
     memset(t, 0, sizeof(thread_t));
+    for (int i=0;i<THREAD_MAX_FD;i++) t->fds[i]=nullptr;
     t->kernel_stack = (uint64_t)kmalloc(8192 + 16) + 8192;
     uint64_t* stack = (uint64_t*)t->kernel_stack;
     // Ensure 16-byte alignment for the stack pointer before ret
@@ -67,6 +70,26 @@ thread_t* thread_create(void (*entry)(void), const char* name) {
     strncpy(t->name, name, sizeof(t->name));
     threads[thread_count++] = t;
     kprintf("thread_create: created thread '%s' with pid %d\n", t->name, t->tid);
+    return t;
+}
+
+thread_t* thread_register_user(uint64_t user_rip, uint64_t user_rsp, const char* name){
+    if (thread_count >= MAX_THREADS) return NULL;
+    thread_t* t = (thread_t*)kmalloc(sizeof(thread_t));
+    if (!t) return NULL;
+    memset(t, 0, sizeof(thread_t));
+    for (int i=0;i<THREAD_MAX_FD;i++) t->fds[i]=nullptr;
+    t->ring = 3;
+    t->user_rip = user_rip;
+    t->user_stack = user_rsp;
+    t->state = THREAD_RUNNING; // уже выполняется как текущее user‑задача
+    t->sleep_until = 0;
+    t->tid = thread_count;
+    strncpy(t->name, name ? name : "user", sizeof(t->name));
+    threads[thread_count++] = t;
+    current_user = t;
+    kprintf("thread_register_user: registered user task '%s' with pid %d rip=0x%llx rsp=0x%llx\n",
+            t->name, t->tid, (unsigned long long)t->user_rip, (unsigned long long)t->user_stack);
     return t;
 }
 
@@ -101,12 +124,8 @@ void thread_block(int pid) {
 void thread_sleep(uint32_t ms) {
     if (ms == 0) return;
     
-    // Вычисляем время пробуждения (в тиках таймера)
-    // Таймер работает на частоте 1000 Гц, поэтому 1 мс = 1 тик
     current->sleep_until = pit_ticks + ms;
     current->state = THREAD_SLEEPING;
-    
-    // Переключаемся на другой поток
     thread_yield();
 }
 
@@ -120,7 +139,6 @@ void thread_schedule() {
         }
     }
     
-    // Ищем следующий готовый поток
     int next = (current->tid + 1) % thread_count;
     for (int i = 0; i < thread_count; ++i) {
         int idx = (next + i) % thread_count;
@@ -128,20 +146,15 @@ void thread_schedule() {
             thread_t* prev = current;
             current = threads[idx];
             current->state = THREAD_RUNNING;
-            
-            // Не меняем состояние предыдущего потока, если он спит
             if (prev->state != THREAD_SLEEPING && prev->state != THREAD_TERMINATED) {
                 prev->state = THREAD_READY;
             }
-            
             context_switch(&prev->context, &current->context);
             return;
         }
     }
-    
-    // Если нет готовых потоков, возвращаемся к idle
-        current = &main_thread;
-        current->state = THREAD_RUNNING;
+    current = &main_thread;
+    current->state = THREAD_RUNNING;
 }
 
 void thread_unblock(int pid) {
@@ -184,3 +197,6 @@ int thread_get_state(int pid) {
 int thread_get_count() {
     return thread_count;
 }
+
+thread_t* thread_get_current_user(){ return current_user; }
+void thread_set_current_user(thread_t* t){ current_user = t; }

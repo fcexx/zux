@@ -39,7 +39,7 @@ static void clear_page_table(page_table_t* table) {
 // Get page table entry for 4KiB page
 static page_table_entry_t* get_page_table_entry(uint64_t virtual_addr, bool create) {
     virtual_address_t* addr = (virtual_address_t*)&virtual_addr;
-
+    
     // L4 (we expect low-half, l4_index==0 for 32-bit addresses)
     if (!(page_table_l4[addr->l4_index] & PAGE_PRESENT)) {
         if (!create) return nullptr;
@@ -48,7 +48,7 @@ static page_table_entry_t* get_page_table_entry(uint64_t virtual_addr, bool crea
         page_table_l4[addr->l4_index] = ((uint64_t)new_l3) | PAGE_PRESENT | PAGE_WRITABLE;
     }
     page_table_entry_t* l3_table = (page_table_entry_t*)(page_table_l4[addr->l4_index] & PAGE_MASK);
-
+    
     // L3
     if (!(l3_table[addr->l3_index] & PAGE_PRESENT)) {
         if (!create) return nullptr;
@@ -57,7 +57,7 @@ static page_table_entry_t* get_page_table_entry(uint64_t virtual_addr, bool crea
         l3_table[addr->l3_index] = ((uint64_t)new_l2) | PAGE_PRESENT | PAGE_WRITABLE;
     }
     page_table_entry_t* l2_table = (page_table_entry_t*)(l3_table[addr->l3_index] & PAGE_MASK);
-
+    
     // L2
     if (!(l2_table[addr->l2_index] & PAGE_PRESENT)) {
         if (!create) return nullptr;
@@ -66,7 +66,7 @@ static page_table_entry_t* get_page_table_entry(uint64_t virtual_addr, bool crea
         l2_table[addr->l2_index] = ((uint64_t)new_l1) | PAGE_PRESENT | PAGE_WRITABLE;
     }
     page_table_entry_t* l1_table = (page_table_entry_t*)(l2_table[addr->l2_index] & PAGE_MASK);
-
+    
     // L1 entry
     return &l1_table[addr->l1_index];
 }
@@ -87,20 +87,23 @@ static void ensure_user_parent_entries(uint64_t virtual_addr) {
 
 void paging_init() {
     PrintQEMU("Initializing paging...\n");
-
+    
     // Clear L4 and reset pool
     clear_page_table(&page_table_l4);
     pt_pool_offset = 0;
-
-    // Identity map first 64MB
+    
+    // Identity map first 64MB (kernel-only)
     paging_map_range(0x00000000ULL, 0x00000000ULL, 0x04000000ULL, PAGE_PRESENT | PAGE_WRITABLE);
 
+    // TEMP: map first 4MB as user-accessible to avoid early user PF on low addresses
+    paging_map_range(0x00000000ULL, 0x00000000ULL, 0x00400000ULL, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+    
     // Map a 16MB window where typical linear framebuffer lies (0xFD000000)
     paging_map_range(0xFD000000ULL, 0xFD000000ULL, 0x01000000ULL, PAGE_PRESENT | PAGE_WRITABLE);
-
+    
     // Load CR3
     paging_load_cr3((uint64_t)&page_table_l4);
-
+    
     PrintQEMU("Paging initialized\n");
 }
 

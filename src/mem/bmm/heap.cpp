@@ -16,6 +16,7 @@ memory_pool::memory_pool() : data(nullptr), next(nullptr) {
             bitmap[i][j] = 0xFFFFFFFFFFFFFFFFULL;
         }
     }
+    size_class = 0xFFFF;
 }
 
 // Small allocation size classes
@@ -46,6 +47,10 @@ HeapAllocator::HeapAllocator(void* start_addr, size_t initial_size)
     
     // Set up initial heap region
     if (start_addr && initial_size > sizeof(heap_block_header)) {
+        // Initialize raw memory span
+        heap_mem_start = static_cast<uint8_t*>(start_addr);
+        heap_mem_end   = heap_mem_start + initial_size;
+
         heap_start = static_cast<heap_block_header*>(start_addr);
         heap_end = heap_start;
         
@@ -114,31 +119,29 @@ heap_block_header* HeapAllocator::find_best_fit(size_t size) {
     }
     
     // Search in current bucket first
-    heap_block_header* best_fit = nullptr;
-    size_t best_size = ~0ULL;
-    
-    for (heap_block_header* current = free_lists[bucket]; current; current = current->next) {
-        PrintfQEMU("[heap]  scan block=%p size=%zu free=%d\n", current, current->size, (int)current->is_free);
-        if (current->size >= size && current->size < best_size) {
-            best_fit = current;
-            best_size = current->size;
-            if (best_size == size) break;
-        }
-    }
-    
-    // If not found in current bucket, search in larger buckets
-    if (!best_fit) {
-        for (size_t i = bucket + 1; i < NUM_BUCKETS; i++) {
-            if (free_lists[i]) {
-                PrintfQEMU("[heap]  fallback to bucket=%zu head=%p size=%zu\n", i, free_lists[i], free_lists[i]->size);
-                best_fit = free_lists[i];
-                break;
+    for (size_t b = bucket; b < NUM_BUCKETS; b++) {
+        heap_block_header* head = free_lists[b];
+        while (head) {
+            if (head->is_free && head->size >= size && validate_block(head)) {
+                return head;
             }
+            head = head->next;
         }
     }
     
-    PrintfQEMU("[heap] find_best_fit: result=%p size=%zu\n", best_fit, best_fit ? best_fit->size : 0ULL);
-    return best_fit;
+    // If not found, try smaller buckets
+    for (size_t b = (bucket == 0 ? 0 : bucket - 1); b < bucket; b--) {
+        heap_block_header* head = free_lists[b];
+        while (head) {
+            if (head->is_free && head->size >= size && validate_block(head)) {
+                return head;
+            }
+            head = head->next;
+        }
+        if (b == 0) break;
+    }
+    
+    return nullptr;
 }
 
 // Split large block if needed (optimized for minimal fragmentation)
@@ -513,49 +516,43 @@ void* HeapAllocator::allocate_small(size_t size) {
         }
     }
     
-    // Find available pool
+    const size_t slot_size = SMALL_SIZES[size_class];
+    const size_t num_slots = memory_pool::POOL_SIZE / slot_size;
+    const size_t num_words = (num_slots + 63) / 64;
+    
+    // Find available pool with matching size_class
     memory_pool* pool = memory_pools;
     while (pool) {
-        // Check if pool has free slots
-        for (size_t i = 0; i < memory_pool::POOL_SIZE / 64; i++) {
-            if (pool->bitmap[size_class][i] != 0) {
-                // Find first free bit
+        if (pool->size_class == size_class) {
+            for (size_t i = 0; i < num_words; i++) {
                 uint64_t bitmap = pool->bitmap[size_class][i];
+                if (bitmap != 0) {
                 int bit_pos = __builtin_ctzll(bitmap);
-                
-                // Mark as allocated
+                    size_t slot_index = i * 64 + static_cast<size_t>(bit_pos);
+                    if (slot_index >= num_slots) break;
                 pool->bitmap[size_class][i] &= ~(1ULL << bit_pos);
-                
-                // Calculate address
-                size_t slot_index = i * 64 + bit_pos;
-                size_t offset = slot_index * SMALL_SIZES[size_class];
-                
+                    size_t offset = slot_index * slot_size;
                 return pool->data + offset;
+                }
             }
         }
         pool = pool->next;
     }
     
-    // Create new pool
+    // Create new pool for this size_class
     memory_pool* new_pool = static_cast<memory_pool*>(malloc(sizeof(memory_pool)));
     if (!new_pool) return nullptr;
-    
-    // Initialize pool structure
     *new_pool = memory_pool();
-    
-    // Allocate pool data once
     new_pool->data = static_cast<uint8_t*>(malloc(memory_pool::POOL_SIZE));
-    if (!new_pool->data) {
-        mfree(new_pool);
-        return nullptr;
-    }
+    if (!new_pool->data) { mfree(new_pool); return nullptr; }
+    new_pool->size_class = static_cast<uint16_t>(size_class);
     
-    // Add to pool list
+    // Link
     new_pool->next = memory_pools;
     memory_pools = new_pool;
     
-    // Allocate from new pool
-    new_pool->bitmap[size_class][0] &= ~1ULL; // Mark first slot as allocated
+    // Allocate first slot
+    if (num_words > 0) new_pool->bitmap[size_class][0] &= ~1ULL;
     return new_pool->data;
 }
 
@@ -565,21 +562,23 @@ void HeapAllocator::deallocate_small(void* ptr) {
     memory_pool* pool = memory_pools;
     while (pool) {
         if (ptr >= pool->data && ptr < pool->data + memory_pool::POOL_SIZE) {
-            // Calculate slot index
             size_t offset = static_cast<uint8_t*>(ptr) - pool->data;
-            
-            // Find size class
-            for (size_t size_class = 0; size_class < sizeof(SMALL_SIZES)/sizeof(SMALL_SIZES[0]); size_class++) {
-                size_t slot_index = offset / SMALL_SIZES[size_class];
-                if (offset % SMALL_SIZES[size_class] == 0 && slot_index < memory_pool::POOL_SIZE / SMALL_SIZES[size_class]) {
-                    // Mark as free
+            size_t size_class = pool->size_class;
+            if (size_class == 0xFFFF) return; // should not happen
+            size_t slot_size = SMALL_SIZES[size_class];
+            if (slot_size == 0) return;
+            size_t num_slots = memory_pool::POOL_SIZE / slot_size;
+            if (num_slots == 0) return;
+            size_t num_words = (num_slots + 63) / 64;
+            size_t slot_index = offset / slot_size;
+            if ((offset % slot_size) == 0 && slot_index < num_slots) {
                     size_t bitmap_index = slot_index / 64;
                     size_t bit_pos = slot_index % 64;
+                if (bitmap_index < num_words) {
                     pool->bitmap[size_class][bitmap_index] |= (1ULL << bit_pos);
-                    return;
                 }
             }
-            break;
+            return;
         }
         pool = pool->next;
     }

@@ -17,11 +17,25 @@
 #include <fat32.h>
 #include <gdt.h>
 #include <syscall.h>
+#include <elf.h>
 
 typedef unsigned int uint32_t;
 
 extern "C" {
     fs_interface_t* fat32_get_interface(void);
+}
+
+extern "C" void enable_sse() {
+    unsigned long cr0, cr4;
+    asm volatile ("mov %%cr0, %0" : "=r"(cr0));
+    cr0 &= ~(1UL << 2);   // EM=0 (enable FPU instructions)
+    cr0 |=  (1UL << 1);   // MP=1 (monitor coprocessor)
+    asm volatile ("mov %0, %%cr0" :: "r"(cr0));
+
+    asm volatile ("mov %%cr4, %0" : "=r"(cr4));
+    cr4 |= (1UL << 9);    // OSFXSR=1 (enable SSE/SSE2 instructions)
+    cr4 |= (1UL << 10);   // OSXMMEXCPT=1 (enable unmasked SIMD FP exceptions)
+    asm volatile ("mov %0, %%cr4" :: "r"(cr4));
 }
 
 void parse_multiboot2(uint64_t addr) {
@@ -62,7 +76,7 @@ void test_thread() {
     while (1);
 }
 
-// Пример функции для чтения содержимого папки
+// я┐╜римя┐╜я┐╜ я┐╜ункции я┐╜я┐╜я┐╜ я┐╜теня┐╜я┐╜ содя┐╜ржия┐╜я┐╜я┐╜я┐╜ я┐╜я┐╜я┐╜я┐╜я┐╜
 void list_directory_contents(const char* path) {
     
     if (!path) {
@@ -72,13 +86,13 @@ void list_directory_contents(const char* path) {
     
     kprintf("Listing directory: %s\n", path);
     
-    // Проверяем, инициализирована ли файловая система
+    // я┐╜ровя┐╜я┐╜яем, я┐╜я┐╜я┐╜циая┐╜я┐╜я┐╜я┐╜ровя┐╜я┐╜я┐╜ я┐╜я┐╜ файя┐╜я┐╜я┐╜я┐╜я┐╜ я┐╜я┐╜темя┐╜
     if (!fs_is_initialized()) {
         kprintf("Filesystem not initialized\n");
         return;
     }
     
-    // Открываем директорию
+    // я┐╜я┐╜я┐╜ывая┐╜я┐╜ я┐╜я┐╜рекя┐╜я┐╜я┐╜
     fs_dir_t* dir = fs_opendir(path);
     
     if (!dir) {
@@ -91,29 +105,29 @@ void list_directory_contents(const char* path) {
     fs_dirent_t entry;
     int count = 0;
     
-    // Читаем все записи в директории с ограничением
+    // я┐╜я┐╜таея┐╜ я┐╜я┐╜ я┐╜я┐╜я┐╜я┐╜я┐╜ я┐╜ я┐╜я┐╜рекя┐╜рии я┐╜ я┐╜я┐╜раня┐╜ченя┐╜я┐╜я┐╜
     while (count < 10) {
         int result = fs_readdir(dir, &entry);
         
         if (result != 0) {
-            // Больше нет записей или произошла ошибка
+            // я┐╜я┐╜я┐╜я┐╜я┐╜ я┐╜я┐╜я┐╜ я┐╜я┐╜я┐╜я┐╜сей я┐╜я┐╜я┐╜ я┐╜роия┐╜я┐╜шла я┐╜шибя┐╜я┐╜
             break;
         }
         
         count++;
         
-        // Проверяем, что имя не пустое
+        // я┐╜ровя┐╜я┐╜яем, я┐╜я┐╜ я┐╜я┐╜я┐╜ я┐╜я┐╜ я┐╜я┐╜я┐╜тое
         if (entry.name[0] == '\0') {
             continue;
         }
 
-        // Определяем тип записи
+        // я┐╜я┐╜редя┐╜я┐╜яем тип я┐╜я┐╜я┐╜я┐╜я┐╜
         const char* type = (entry.attributes & FS_ATTR_DIRECTORY) ? "DIR" : "FILE";
         
-        // Выводим информацию о файле/папке
+        // я┐╜ывоя┐╜я┐╜я┐╜ я┐╜я┐╜я┐╜рмая┐╜я┐╜ я┐╜ файя┐╜я┐╜/я┐╜я┐╜я┐╜я┐╜я┐╜
         kprintf(" [%s] %s", type, entry.name);
         
-        // Если это файл, показываем размер
+        // я┐╜сли я┐╜я┐╜ файя┐╜, я┐╜я┐╜я┐╜я┐╜я┐╜ывая┐╜я┐╜ разя┐╜я┐╜я┐╜
         if (!(entry.attributes & FS_ATTR_DIRECTORY)) {
             kprintf(" (%u bytes)", (unsigned int)entry.size);
         }
@@ -123,7 +137,7 @@ void list_directory_contents(const char* path) {
     
     kprintf("total %d\n", count);
     
-    // Закрываем директорию
+    // я┐╜я┐╜я┐╜я┐╜ывая┐╜я┐╜ я┐╜я┐╜рекя┐╜я┐╜я┐╜
     fs_closedir(dir);
 }
 void keyboard_test_thread() {
@@ -173,21 +187,10 @@ void keyboard_test_thread() {
     }
 }
 
-static void user_demo() {
-    // call write(1, "Hello from user\n", 17) via int 0x80
-    const char* msg = "Hello from user\n";
-    register uint64_t rax asm("rax") = SYS_WRITE;
-    register uint64_t rdi asm("rdi") = 1;
-    register uint64_t rsi asm("rsi") = (uint64_t)msg;
-    register uint64_t rdx asm("rdx") = 17;
-    asm volatile ("int $0x80" : "+a"(rax) : "D"(rdi), "S"(rsi), "d"(rdx) : "rcx", "r11", "memory");
-    // exit(0)
-    rax = SYS_EXIT; rdi = 0; rsi = 0; rdx = 0;
-    asm volatile ("int $0x80" : "+a"(rax) : "D"(rdi), "S"(rsi), "d"(rdx) : "rcx", "r11", "memory");
-    for(;;) { asm volatile("hlt"); }
-}
+// user_demo удая┐╜я┐╜: я┐╜я┐╜я┐╜я┐╜я┐╜ я┐╜я┐╜я┐╜я┐╜ужая┐╜я┐╜ ELF я┐╜я┐╜ файя┐╜я┐╜я┐╜я┐╜я┐╜ я┐╜я┐╜темя┐╜
 
 extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_ptr) {
+    enable_sse();
     parse_multiboot2(multiboot2_info_ptr);
     
     idt_init();
@@ -198,16 +201,22 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
     pic_unmask_irq(14);
     pic_unmask_irq(15);
     
-    // включаем страничную адресацию ранним вызовом
+    // чае ран  ран ызо
     paging_init();
 
-    // Точный маппинг фреймбуфера (после parse_multiboot2/vbe_init, до любого доступа)
+    // я┐╜я┐╜я┐╜я┐╜ я┐╜я┐╜я┐╜я┐╜я┐╜я┐╜я┐╜ я┐╜рейя┐╜я┐╜я┐╜я┐╜я┐╜ (я┐╜я┐╜сле parse_multiboot2/vbe_init, я┐╜я┐╜ я┐╜юбоя┐╜я┐╜ я┐╜я┐╜я┐╜я┐╜упа)
     if (framebuffer_addr && fb_height && fb_pitch) {
         uint64_t fb_start = (uint64_t)framebuffer_addr;
         uint64_t fb_size  = (uint64_t)fb_height * (uint64_t)fb_pitch;
-        uint64_t map_start = fb_start & ~0xFULL; // выравнивание вниз к 4К
-        uint64_t map_end   = (fb_start + fb_size + 0xFFFULL) & ~0xFULL; // вверх к 4К
+        // ╨Т╨л╨а╨Р╨Т╨Э╨Ш╨Т╨Р╨Э╨Ш╨Х ╨Я╨Ю 4╨Ъ ╨б╨в╨а╨Р╨Э╨Ш╨ж╨Х, ╨░ ╨╜╨╡ ╨╜╨░ 16 ╨▒╨░╨╣╤В
+        uint64_t map_start = fb_start & ~0xFFFULL;                      // align down to 4K
+        uint64_t map_end   = (fb_start + fb_size + 0xFFFULL) & ~0xFFFULL; // align up to 4K
         uint64_t map_size  = map_end - map_start;
+        PrintfQEMU("[fbmap] fb_start=0x%llx size=%llu map_start=0x%llx map_size=%llu\n",
+                   (unsigned long long)fb_start,
+                   (unsigned long long)fb_size,
+                   (unsigned long long)map_start,
+                   (unsigned long long)map_size);
         paging_map_range(map_start, map_start, map_size, PAGE_PRESENT | PAGE_WRITABLE);
     }
 
@@ -227,9 +236,9 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
     thread_init();
 
     ata_init();
-    iothread_init(); // Инициализируем I/O планировщик
+    iothread_init(); // я┐╜я┐╜я┐╜циая┐╜я┐╜я┐╜я┐╜я┐╜уем I/O я┐╜я┐╜я┐╜я┐╜я┐╜ровщик
 
-    // Инициализируем файловую систему только после ATA
+    // я┐╜я┐╜я┐╜циая┐╜я┐╜я┐╜я┐╜я┐╜уем файя┐╜я┐╜я┐╜я┐╜я┐╜ я┐╜я┐╜темя┐╜ только я┐╜я┐╜сле ATA
     kprintf("Initializing filesystem...\n");
     fs_interface_t* fat32_interface = fat32_get_interface();
     if (fs_init(fat32_interface) == 0) {
@@ -238,36 +247,36 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
         kprintf("Failed to initialize filesystem - continuing without filesystem\n");
     }
     list_directory_contents("/");            
-    thread_create(keyboard_test_thread, "basic_shell");
 
-    // Инициализация GDT/TSS
+    // я┐╜я┐╜я┐╜циая┐╜я┐╜я┐╜я┐╜я┐╜я┐╜ GDT/TSS
     gdt_init();
-    // Выделяем и настраиваем kernel-стек для главного (current) потока, иначе при переходе из ring3 по IRQ будет нулевой rsp0
+    // я┐╜ыдея┐╜яем я┐╜ я┐╜я┐╜я┐╜я┐╜раия┐╜я┐╜я┐╜я┐╜ kernel-я┐╜тек я┐╜я┐╜я┐╜ я┐╜я┐╜я┐╜я┐╜я┐╜я┐╜я┐╜я┐╜ (current) я┐╜я┐╜токя┐╜, я┐╜я┐╜я┐╜я┐╜ я┐╜я┐╜ я┐╜я┐╜я┐╜ходя┐╜ я┐╜я┐╜ ring3 я┐╜я┐╜ IRQ я┐╜удея┐╜ я┐╜улея┐╜я┐╜я┐╜ rsp0
     void* kstack = kmalloc(16384);
     uint64_t kstack_top = (uint64_t)kstack + 16384;
     thread_current()->kernel_stack = kstack_top;
     tss_set_rsp0(kstack_top);
 
-    // Инициализация системных вызовов (int 0x80)
+    // я┐╜я┐╜я┐╜циая┐╜я┐╜я┐╜я┐╜я┐╜я┐╜ я┐╜я┐╜темя┐╜я┐╜я┐╜ я┐╜ызоя┐╜я┐╜я┐╜ (int 0x80)
     syscall_init();
 
+    kprintf("OS is ready; enabling interrupts\n\n");
     asm volatile("sti");
 
-    // Подготовка простого перехода в ring3: выделяем стек юзера
-    void* ustack = kmalloc(16384);
-    uint64_t ustack_top = ((uint64_t)ustack + 16384) & ~0xFULL; // 16-byte align
-    // Разрешаем доступ user к страницам стека: диапазон [top-size, top) с округлением до страниц, включая страницу с top-1
-    uint64_t usr_stack_start = ((ustack_top - 16384) & ~0xFFFULL);
-    uint64_t usr_stack_end   = (ustack_top + 0xFFFULL) & ~0xFFFULL; // включить страницу, где лежит ustack_top
-    uint64_t usr_stack_size  = usr_stack_end - usr_stack_start;
-    paging_map_range(usr_stack_start, usr_stack_start, usr_stack_size, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
-    // Разрешаем пользователю выполнить страницу с user_demo (временно)
-    uint64_t ucode = ((uint64_t)user_demo) & ~0xFFFULL;
-    paging_map_range(ucode, ucode, 0x1000, PAGE_PRESENT | PAGE_USER);
-    PrintfQEMU("\nPAGING MAP RANGE 2 OK\n");
+    // я┐╜я┐╜я┐╜я┐╜узкя┐╜ ELF я┐╜я┐╜ FAT32 я┐╜ я┐╜я┐╜я┐╜я┐╜я┐╜ я┐╜ userspace
+    uint64_t elf_entry = 0, ustack_top = 0;
+    if (elf64_load_process("/boot/user.elf", 1 << 20, &elf_entry, &ustack_top) == 0) {
+        PrintfQEMU("[elf] loaded: entry=0x%llx, ustack=0x%llx\n", (unsigned long long)elf_entry, (unsigned long long)ustack_top);
+        // ╨а╨╡╨│╨╕╤Б╤В╤А╨╕╤А╤Г╨╡╨╝ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╤М╤Б╨║╨╕╨╣ ╨┐╤А╨╛╤Ж╨╡╤Б╤Б ╨▓ ╤Б╨┐╨╕╤Б╨║╨╡ ╤Б╨╕╤Б╤В╨╡╨╝╨╜╤Л╤Е ╨┐╨╛╤В╨╛╨║╨╛╨▓
+        thread_register_user(elf_entry, ustack_top, "user.elf");
+        PrintfQEMU("[enter_user] rip=0x%llx rsp=0x%llx cs=0x%x ss=0x%x\n",
+                   (unsigned long long)elf_entry,
+                   (unsigned long long)ustack_top,
+                   (unsigned)USER_CS,
+                   (unsigned)USER_DS);
+        enter_user_mode(elf_entry, ustack_top);
+    } else {
+        kprintf("ELF load failed\n");
+    }
 
-    // В реальном случае сюда загрузим ELF, пока ? тестовая функция
-    enter_user_mode((uint64_t)user_demo, ustack_top);
-
-    while (true); // kernel idle
+    for(;;) { asm volatile("hlt"); }
 } 

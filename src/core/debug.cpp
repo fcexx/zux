@@ -63,7 +63,44 @@ void PrintfQEMU(const char* format, ...) {
                     format++;
                 }
             }
-            
+ 
+            // Обработка длины ll для hex/dec
+            if (*format == 'l' && *(format+1) == 'l') {
+                // Длина ll
+                format += 2;
+                if (*format == 'x' || *format == 'X') {
+                    unsigned long long val = va_arg(args, unsigned long long);
+                    char temp[32]; int i = 0;
+                    if (val == 0) { temp[i++] = '0'; }
+                    else {
+                        while (val > 0) {
+                            int digit = (int)(val % 16ULL);
+                            temp[i++] = (*format == 'x')
+                                ? ((digit < 10) ? '0' + digit : 'a' + digit - 10)
+                                : ((digit < 10) ? '0' + digit : 'A' + digit - 10);
+                            val /= 16ULL;
+                        }
+                    }
+                    while (i > 0) *ptr++ = temp[--i];
+                    format++;
+                    continue;
+                } else if (*format == 'u') {
+                    unsigned long long val = va_arg(args, unsigned long long);
+                    if (val == 0) { *ptr++ = '0'; }
+                    else { char temp[32]; int i=0; while (val>0){ temp[i++]='0'+(val%10); val/=10; } while(i>0){ *ptr++=temp[--i]; } }
+                    format++;
+                    continue;
+                } else if (*format == 'd' || *format == 'i') {
+                    long long val = va_arg(args, long long);
+                    if (val < 0) { *ptr++='-'; val = -val; }
+                    if (val == 0) { *ptr++ = '0'; }
+                    else { char temp[32]; int i=0; while (val>0){ temp[i++]='0'+(int)(val%10); val/=10; } while(i>0){ *ptr++=temp[--i]; } }
+                    format++;
+                    continue;
+                }
+                // если после ll неожиданный спецификатор — упадём в общий switch ниже с символом после ll
+            }
+
             if (*format == 'l' && *(format+1) == 'l' && *(format+2) == 'u') {
                 // %llu
                 format += 2;
@@ -140,49 +177,9 @@ void PrintfQEMU(const char* format, ...) {
                     }
                     format++;
                     continue;
-                } else if (*format == 'x' || *format == 'X') {
-                    unsigned long val = va_arg(args, unsigned long);
-                    char temp[32];
-                    int i = 0;
-                    if (val == 0) {
-                        temp[i++] = '0';
-                    } else {
-                        while (val > 0) {
-                            int digit = val % 16;
-                            temp[i++] = (*format == 'x')
-                                ? ((digit < 10) ? '0' + digit : 'a' + digit - 10)
-                                : ((digit < 10) ? '0' + digit : 'A' + digit - 10);
-                            val /= 16;
-                        }
-                    }
-                    while (i > 0) {
-                        *ptr++ = temp[--i];
-                    }
-                    format++;
-                    continue;
-                } else if (*format == 'd' || *format == 'i') {
-                    long val = va_arg(args, long);
-                    if (val < 0) {
-                        *ptr++ = '-';
-                        val = -val;
-                    }
-                    if (val == 0) {
-                        *ptr++ = '0';
-                    } else {
-                        char temp[32];
-                        int i = 0;
-                        while (val > 0) {
-                            temp[i++] = '0' + (val % 10);
-                            val /= 10;
-                        }
-                        while (i > 0) {
-                            *ptr++ = temp[--i];
-                        }
-                    }
-                    format++;
-                    continue;
                 }
             }
+            
             switch (*format) {
                 case 'd': {
                     int val = va_arg(args, int);

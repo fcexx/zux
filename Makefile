@@ -92,3 +92,6 @@ run:
 
 debug:
 	qemu-system-x86_64 -drive format=raw,file=solar.img -m 512M -s -S -debugcon stdio
+
+vmdk:
+	qemu-img convert -f raw -O vmdk solar.img solar.vmdk

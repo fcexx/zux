@@ -2,6 +2,7 @@
 #define THREAD_H
 #include <stdint.h>
 #include <context.h>
+#include <fs_interface.h>
 
 typedef enum {
     THREAD_READY,
@@ -10,6 +11,8 @@ typedef enum {
     THREAD_TERMINATED,
     THREAD_SLEEPING
 } thread_state_t;
+
+#define THREAD_MAX_FD 16
 
 typedef struct thread {
     context_t context;
@@ -22,6 +25,7 @@ typedef struct thread {
     uint64_t tid;
     char name[32];
     uint32_t sleep_until;  // Время пробуждения (в тиках таймера)
+    fs_file_t* fds[THREAD_MAX_FD];
 } thread_t;
 
 extern int init;
@@ -39,5 +43,12 @@ void thread_unblock(int pid);
 int thread_get_state(int pid);
 int thread_get_count();
 void thread_sleep(uint32_t ms);
+
+// Регистрация пользовательского «потока» (процесса) для отображения в списке
+thread_t* thread_register_user(uint64_t user_rip, uint64_t user_rsp, const char* name);
+
+// Доступ к текущему пользовательскому потоку
+thread_t* thread_get_current_user();
+void thread_set_current_user(thread_t* t);
 
 #endif // THREAD_H 

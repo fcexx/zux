@@ -70,13 +70,15 @@ void vbedbuff_clear(uint32_t color) {
         return;
     }
     
-    // Fill back buffer with color using optimized memset-like approach
-    uint32_t* buffer_ptr = (uint32_t*)back_buffer;
-    size_t total_pixels = vbe_get_width() * vbe_get_height();
+    uint32_t width = vbe_get_width();
+    uint32_t height = vbe_get_height();
+    uint32_t pitch = vbe_get_pitch();
     
-    // Use word-sized writes for better performance
-    for (size_t i = 0; i < total_pixels; i++) {
-        buffer_ptr[i] = color;
+    for (uint32_t y = 0; y < height; y++) {
+        uint32_t* row = (uint32_t*)((uint8_t*)back_buffer + y * pitch);
+        for (uint32_t x = 0; x < width; x++) {
+            row[x] = color;
+        }
     }
 }
 
@@ -167,10 +169,16 @@ void vbedbuff_flip() {
         return;
     }
     
-    // Use direct memory copy for better performance
-    // This assumes both buffers have the same format and size
-    size_t buffer_size = vbe_get_height() * vbe_get_pitch();
-    memcpy(framebuffer_addr, back_buffer, buffer_size);
+    uint32_t width = vbe_get_width();
+    uint32_t height = vbe_get_height();
+    uint32_t pitch = vbe_get_pitch();
+    uint32_t row_bytes = width * (vbe_get_bpp() / 8);
+    
+    for (uint32_t y = 0; y < height; y++) {
+        uint8_t* dst = (uint8_t*)framebuffer_addr + y * pitch;
+        uint8_t* src = (uint8_t*)back_buffer + y * pitch;
+        memcpy(dst, src, row_bytes);
+    }
 }
 
 // Swap buffers (if we had multiple back buffers)

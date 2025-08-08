@@ -12,8 +12,8 @@ inline void  operator delete(void*, void*) noexcept {}
 void heap_init() {
     PrintQEMU("heap_init() called\n");
     
-    // Allocate initial heap region (2MB)
-    static uint8_t heap_region[2 * 1024 * 1024] __attribute__((aligned(4096)));
+    // Allocate initial heap region (8MB)
+    static uint8_t heap_region[8 * 1024 * 1024] __attribute__((aligned(4096)));
     
     static bool initialized = false;
     if (!initialized) {
@@ -29,8 +29,8 @@ void heap_init() {
 
         // Construct allocator with placement-new
         new (g_heap) HeapAllocator(heap_data, heap_size);
-
-        PrintfQEMU("Heap initialized with %llu bytes available\n", (unsigned long long)heap_size);
+            
+            PrintfQEMU("Heap initialized with %llu bytes available\n", (unsigned long long)heap_size);
         initialized = true;
     }
 }

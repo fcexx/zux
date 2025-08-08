@@ -32,6 +32,7 @@ struct __attribute__((aligned(64))) memory_pool {
     uint8_t* data;
     uint64_t bitmap[NUM_SIZES][POOL_SIZE / 64];  // Bitmap for each size class
     memory_pool* next;
+    uint16_t size_class; // пул обслуживает ТОЛЬКО один класс размеров из SMALL_SIZES; 0xFFFF = неинициализирован
     
     memory_pool();
 };

@@ -38,14 +38,14 @@ extern "C" void isr_dispatch(cpu_registers_t* regs) {
         }
         pic_send_eoi(vec - 32);
         return;
-    }
-
+        }
+        
     // Any other vector: call registered handler if present (e.g., int 0x80)
     if (isr_handlers[vec]) {
         isr_handlers[vec](regs);
         return;
     }
-
+    
     // Exceptions 0..31 without specific handler: print and halt
     if (vec < 32) {
         PrintfQEMU("Exception: %s\n", exception_messages[vec]);
@@ -55,10 +55,10 @@ extern "C" void isr_dispatch(cpu_registers_t* regs) {
         PrintfQEMU("GPR: RAX=0x%llx RBX=0x%llx RCX=0x%llx RDX=0x%llx RSI=0x%llx RDI=0x%llx R8=0x%llx R9=0x%llx R10=0x%llx R11=0x%llx R12=0x%llx R13=0x%llx R14=0x%llx R15=0x%llx\n",
                    regs->rax, regs->rbx, regs->rcx, regs->rdx, regs->rsi, regs->rdi,
                    regs->r8, regs->r9, regs->r10, regs->r11, regs->r12, regs->r13, regs->r14, regs->r15);
-        PrintfQEMU("Halted due to unhandled exception\n");
-        for (;;);
+            PrintfQEMU("Halted due to unhandled exception\n");
+            for (;;);
     }
-
+    
     // Unknown vector
     PrintfQEMU("Unknown interrupt %d (0x%x)\n", vec, vec);
     PrintfQEMU("RIP: 0x%x, RSP: 0x%x\n", regs->rip, regs->rsp);
@@ -82,13 +82,13 @@ void idt_set_handler(uint8_t num, void (*handler)(cpu_registers_t*)) {
 void idt_init() {
     idt_ptr.limit = sizeof(idt) - 1;
     idt_ptr.base = (uint64_t)&idt;
-
+    
     for (int i = 0; i < 256; i++) {
         idt_set_gate(i, isr_stub_table[i], 0x08, 0x8E);
     }
-
+    
     // Register detailed page fault handler
     idt_set_handler(14, page_fault_handler);
-
+    
     asm volatile("lidt %0" : : "m"(idt_ptr));
 }

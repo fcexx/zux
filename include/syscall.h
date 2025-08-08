@@ -5,8 +5,13 @@
 #include <idt.h>
 
 enum syscall_nr {
-    SYS_YIELD = 0,
+    SYS_READ  = 0,   // также принимаем Linux ABI
     SYS_WRITE = 1,
+    SYS_OPEN  = 2,
+    SYS_CLOSE = 3,
+    SYS_SEEK  = 4,
+    SYS_SLEEP = 5,
+    SYS_YIELD = 24,  // внутренний (оставляем, но используем редко)
     SYS_EXIT  = 60,
 };
 

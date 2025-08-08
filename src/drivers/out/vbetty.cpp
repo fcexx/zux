@@ -46,8 +46,8 @@ void vbetty_init() {
         }
     }
 
-    console_width_chars = 640 / 8;  // 8 pixels per char width
-    console_height_chars = 480 / 8; // 8 pixels per char height
+    console_width_chars = 800 / 8;  // 8 pixels per char width
+    console_height_chars = 600 / 8; // 8 pixels per char height
 
     // Проверяем, что размеры разумные
     if (console_width_chars == 0 || console_height_chars == 0) {

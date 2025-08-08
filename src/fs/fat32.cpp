@@ -5,6 +5,7 @@
 #include <string.h>
 #include <heap.h>
 #include <stdbool.h>
+#include <stdint.h>
 static_assert(sizeof(fat32_dir_entry_t)==32, "fat32_dir_entry_t must be 32 bytes");
 
 #ifndef FAT_DEBUG
@@ -43,26 +44,31 @@ static char toupper_ascii(char c) {
 /* Decode 13 UTF-16 characters from LFN record to ASCII.
  * Returns the number of added characters. */
 static int lfn_copy_part(char *dst, const fat32_lfn_entry_t *lfn) {
+    if (!dst || !lfn) return 0;
     int pos = 0;
-    const uint16_t *src16;
-    // name1
-    src16 = lfn->name1;
-    for (int i=0;i<5;i++) {
-        uint8_t ch = src16[i] & 0xFF;
+    const uint8_t *p = reinterpret_cast<const uint8_t*>(lfn);
+    auto read_char = [&](int byte_off) -> uint8_t {
+        // UTF-16LE: берём младший байт
+        uint8_t lo = p[byte_off];
+        uint8_t hi = p[byte_off+1];
+        (void)hi; // игнорируем для ASCII
+        return lo;
+    };
+    // name1: 5 UTF-16 (offset 1..10)
+    for (int i = 0; i < 5; i++) {
+        uint8_t ch = read_char(1 + i*2);
         if (ch==0x00 || ch==0xFF) { dst[pos]=0; return pos; }
         dst[pos++] = ch;
     }
-    // name2
-    src16 = lfn->name2;
-    for (int i=0;i<6;i++) {
-        uint8_t ch = src16[i] & 0xFF;
+    // name2: 6 UTF-16 (offset 14..25)
+    for (int i = 0; i < 6; i++) {
+        uint8_t ch = read_char(14 + i*2);
         if (ch==0x00 || ch==0xFF) { dst[pos]=0; return pos; }
         dst[pos++] = ch;
     }
-    // name3
-    src16 = lfn->name3;
-    for (int i=0;i<2;i++) {
-        uint8_t ch = src16[i] & 0xFF;
+    // name3: 2 UTF-16 (offset 28..31)
+    for (int i = 0; i < 2; i++) {
+        uint8_t ch = read_char(28 + i*2);
         if (ch==0x00 || ch==0xFF) { dst[pos]=0; return pos; }
         dst[pos++] = ch;
     }
@@ -129,7 +135,7 @@ int fat32_mount(uint8_t drive) {
     }
     
     // Ищем активный раздел FAT32
-    uint32_t partition_lba = 0;
+    partition_lba = 0;
     for (int i = 0; i < 4; i++) {
         int offset = 0x1BE + i * 16;
         uint8_t status = sector[offset];
@@ -167,7 +173,7 @@ int fat32_mount(uint8_t drive) {
     if (fat32_bpb.table_size_32==0) { kfree(sector); PrintfQEMU("[FAT32][ERR] fat32_mount: table_size_32 is 0\n"); return -7; }
     sectors_per_fat     = fat32_bpb.table_size_32;
     fat_start           = fat32_bpb.reserved_sector_count;
-    cluster_begin_lba   = partition_lba + fat_start + fat32_bpb.table_count * sectors_per_fat;
+    cluster_begin_lba   = fat_start + fat32_bpb.table_count * sectors_per_fat;
     root_dir_first_cluster = fat32_bpb.root_cluster ? fat32_bpb.root_cluster : 2;
     current_dir_cluster = root_dir_first_cluster;
 
@@ -245,6 +251,8 @@ int fat32_list_dir(uint8_t drive, uint32_t cluster,
                 }
                 if (ent->attr==0x0F) {
                     fat32_lfn_entry_t *lfn = (fat32_lfn_entry_t*)ent;
+                    // Надёжная валидация LFN-записи
+                    if (lfn->attr != 0x0F || lfn->type != 0) { lfn_present = 0; continue; }
                     int ord = lfn->order & 0x1F;    // 1..N
                     if (lfn->order & 0x40) {
                         /* это начало новой цепочки LFN – очищаем буфер */
@@ -253,6 +261,9 @@ int fat32_list_dir(uint8_t drive, uint32_t cluster,
                     if (ord>0 && ord<=20) {
                         lfn_copy_part(lfn_parts[ord-1], lfn);
                         if (lfn->order & 0x40) lfn_present = ord; // последний элемент
+                    } else {
+                        // некорректный номер части — сбрасываем цепочку
+                        lfn_present = 0;
                     }
                     continue;
                 }
@@ -1038,8 +1049,10 @@ static int fat32_fs_stat(const char* path, fs_stat_t* stat) {
     
     char parent_path[256];
     if (last_slash) {
-        strncpy(parent_path, path, last_slash - path);
-        parent_path[last_slash - path] = '\0';
+        size_t len = (size_t)(last_slash - path);
+        if (len >= sizeof(parent_path)) len = sizeof(parent_path) - 1;
+        memcpy(parent_path, path, len);
+        parent_path[len] = '\0';
     } else {
         strcpy(parent_path, ".");
     }
@@ -1208,20 +1221,37 @@ static int fat32_fs_rename(const char* old_path, const char* new_path) {
 static int fat32_fs_seek(fs_file_t* file, int offset, int whence) {
     if (!file || !file->private_data) return -1;
     struct fat32_fs_file* ffile = (struct fat32_fs_file*)file->private_data;
+    uint32_t new_pos = ffile->position;
     switch (whence) {
         case FS_SEEK_SET:
-            ffile->position = offset;
+            new_pos = (offset < 0) ? 0u : (uint32_t)offset;
             break;
         case FS_SEEK_CUR:
-            ffile->position += offset;
+            if (offset < 0) {
+                uint32_t dec = (uint32_t)(-offset);
+                new_pos = (dec > new_pos) ? 0u : (new_pos - dec);
+            } else {
+                uint32_t inc = (uint32_t)offset;
+                if (0xFFFFFFFFu - new_pos < inc) new_pos = 0xFFFFFFFFu; else new_pos += inc;
+            }
             break;
-        case FS_SEEK_END:
-            ffile->position = ffile->size + offset;
-            break;
+        case FS_SEEK_END: {
+            uint32_t base = ffile->size;
+            if (offset < 0) {
+                uint32_t dec = (uint32_t)(-offset);
+                new_pos = (dec > base) ? 0u : (base - dec);
+            } else {
+                uint32_t inc = (uint32_t)offset;
+                if (0xFFFFFFFFu - base < inc) new_pos = 0xFFFFFFFFu; else new_pos = base + inc;
+            }
+            break; }
         default:
             return -1;
     }
-    return ffile->position;
+    if (new_pos > ffile->size) new_pos = ffile->size;
+    ffile->position = new_pos;
+    file->position = new_pos;
+    return (int)new_pos;
 }
 
 // --- ИНТЕГРАЦИЯ С СИСТЕМОЙ ---

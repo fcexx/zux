@@ -194,6 +194,7 @@ void ata_init() {
 // Улучшенная версия чтения сектора с поддержкой асинхронности
 int ata_read_sector(uint8_t drive, uint32_t lba, uint8_t* buffer) {
     if (drive >= 4 || !drives[drive].present) {
+        PrintfQEMU("[ATA][ERR] read: bad drive %u\n", drive);
         return -1;
     }
     
@@ -216,11 +217,13 @@ int ata_read_sector(uint8_t drive, uint32_t lba, uint8_t* buffer) {
     do {
         status = inb(base + ATA_STATUS);
         if (--timeout == 0) {
+            PrintfQEMU("[ATA][ERR] read: BSY timeout lba=%u status=0x%02x\n", lba, status);
             return -1;
         }
     } while (status & ATA_SR_BSY);
 
     if (ata_check_error(base)) {
+        PrintfQEMU("[ATA][ERR] read: ERR after BSY clear lba=%u status=0x%02x\n", lba, status);
         return -1;
     }
 
@@ -229,11 +232,13 @@ int ata_read_sector(uint8_t drive, uint32_t lba, uint8_t* buffer) {
     do {
         status = inb(base + ATA_STATUS);
         if (--timeout == 0) {
+            PrintfQEMU("[ATA][ERR] read: DRQ timeout lba=%u status=0x%02x\n", lba, status);
             return -1;
         }
     } while (!(status & ATA_SR_DRQ) && !(status & ATA_SR_ERR));
 
     if (status & ATA_SR_ERR) {
+        PrintfQEMU("[ATA][ERR] read: DRQ error lba=%u status=0x%02x\n", lba, status);
         return -1;
     }
 
