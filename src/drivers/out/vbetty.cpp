@@ -46,8 +46,8 @@ void vbetty_init() {
         }
     }
 
-    console_width_chars = 800 / 8;  // 8 pixels per char width
-    console_height_chars = 600 / 8; // 8 pixels per char height
+    console_width_chars = vbe_get_width() / 8;  // 8 px per char
+    console_height_chars = vbe_get_height() / 8; // 8 px per char
 
     // Проверяем, что размеры разумные
     if (console_width_chars == 0 || console_height_chars == 0) {
@@ -105,8 +105,7 @@ void vbetty_clear() {
     vbedbuff_clear(current_bg_color);
     vbetty_cursor_x = 0;
     vbetty_cursor_y = 0;
-    
-    // Clear the screen buffers
+
     if (screen_buffer && fg_color_buffer && bg_color_buffer) {
         size_t buffer_size = console_width_chars * console_height_chars;
         for (size_t i = 0; i < buffer_size; i++) {

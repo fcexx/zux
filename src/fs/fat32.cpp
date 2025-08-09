@@ -1138,52 +1138,81 @@ static int fat32_fs_read(fs_file_t* file, void* buffer, size_t size) {
         return -1;
     }
     struct fat32_fs_file* ffile = (struct fat32_fs_file*)file->private_data;
-    
+
     PrintfQEMU("[FAT32] fat32_fs_read: position=%u, size=%u\n", ffile->position, ffile->size);
-    
-    // Проверяем границы
+
+    // EOF
     if (ffile->position >= ffile->size) {
         PrintfQEMU("[FAT32] fat32_fs_read: EOF reached\n");
-        return 0; // EOF
+        return 0;
     }
-    
-    // Вычисляем сколько байт можно прочитать
+
+    // Ограничиваем запрошенный размер доступными данными
     size_t available = ffile->size - ffile->position;
     if (size > available) {
         size = available;
         PrintfQEMU("[FAT32] fat32_fs_read: adjusted size to %zu\n", size);
     }
-    
-    // Если размер стал 0, возвращаем 0 (EOF)
-    if (size == 0) {
-        PrintfQEMU("[FAT32] fat32_fs_read: size is 0, returning EOF\n");
-        return 0;
+    if (size == 0) return 0;
+
+    // Размер кластера
+    uint32_t sectors_per_cluster = fat32_bpb.sectors_per_cluster ? fat32_bpb.sectors_per_cluster : 1;
+    uint32_t cluster_size = sectors_per_cluster * 512;
+    if (cluster_size == 0) cluster_size = 512;
+
+    uint32_t pos = ffile->position;
+    uint8_t* dst = (uint8_t*)buffer;
+    size_t to_read = size;
+
+    // Найти кластер, соответствующий текущей позиции
+    uint32_t cl = ffile->first_cluster;
+    if (cl < 2) return -1;
+    uint32_t skip_clusters = pos / cluster_size;
+    for (uint32_t i = 0; i < skip_clusters; i++) {
+        cl = fat32_get_next_cluster(0, cl);
+        if (cl >= 0x0FFFFFF8) return -1;
     }
-    
-    // Проверяем что position не слишком большой
-    if (ffile->position > 0x1000000) { // 16MB максимум
-        PrintfQEMU("[FAT32][ERROR] fat32_fs_read: position too large: %u\n", ffile->position);
-        return -1;
+
+    // Буфер одного сектора
+    uint8_t* sector = (uint8_t*)kmalloc(512);
+    if (!sector) return -1;
+
+    while (to_read > 0 && cl < 0x0FFFFFF8) {
+        uint32_t within_cluster = pos % cluster_size;
+        uint32_t sec_in_cluster = within_cluster / 512;
+        uint32_t sec_off = within_cluster % 512;
+
+        // Переходим на следующий кластер, если превышаем его границы
+        if (sec_in_cluster >= sectors_per_cluster) {
+            cl = fat32_get_next_cluster(0, cl);
+            if (cl >= 0x0FFFFFF8) break;
+            continue;
+        }
+
+        uint32_t lba = fat32_cluster_to_lba(cl) + sec_in_cluster;
+        if (ata_read_sector(0, lba, sector) != 0) { kfree(sector); return -1; }
+
+        uint32_t chunk = 512 - sec_off;
+        if (chunk > to_read) chunk = (uint32_t)to_read;
+        memcpy(dst, sector + sec_off, chunk);
+
+        dst += chunk;
+        pos += chunk;
+        to_read -= chunk;
+
+        // Если достигли конца кластера, перейти к следующему
+        if ((pos % cluster_size) == 0 && to_read > 0) {
+            cl = fat32_get_next_cluster(0, cl);
+            if (cl >= 0x0FFFFFF8) break;
+        }
     }
-    
-    PrintfQEMU("[FAT32] fat32_fs_read: reading %zu bytes from position %u\n", size, ffile->position);
-    
-    // Читаем весь файл в буфер
-    uint8_t *file_buffer = (uint8_t*)kmalloc(ffile->size);
-    if (!file_buffer) return -1;
-    
-    int result = fat32_read_file(0, ffile->first_cluster, file_buffer, ffile->size);
-    if (result < 0) {
-        kfree(file_buffer);
-        return result;
-    }
-    
-    // Копируем нужную часть
-    memcpy(buffer, file_buffer + ffile->position, size);
-    ffile->position += size;
-    
-    kfree(file_buffer);
-    return size;
+
+    kfree(sector);
+
+    size_t read_total = size - to_read;
+    ffile->position = pos;
+    file->position = pos;
+    return (int)read_total;
 }
 
 static int fat32_fs_write(fs_file_t* file, const void* buffer, size_t size) {

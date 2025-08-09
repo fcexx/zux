@@ -20,6 +20,8 @@ extern "C" {
 #endif
 
 void syscall_init();
+// Инициализация x86_64 SYSCALL/SYSRET (MSR STAR/LSTAR/SFMASK, EFER.SCE)
+void syscall_x64_init();
 void syscall_dispatch(cpu_registers_t* regs);
 
 #ifdef __cplusplus

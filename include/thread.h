@@ -19,12 +19,14 @@ typedef struct thread {
     uint64_t kernel_stack; // user mode (ring 3)
     uint64_t user_stack;   // user mode (ring 3)
     uint64_t user_rip;     // user mode (ring 3)
+    uint64_t user_fs_base; // TLS base for userspace
     uint8_t ring;          // user mode (ring 3)
     thread_state_t state;
     struct thread* next;
     uint64_t tid;
     char name[32];
     uint32_t sleep_until;  // Время пробуждения (в тиках таймера)
+    uint64_t clear_child_tid; // для set_tid_address
     fs_file_t* fds[THREAD_MAX_FD];
 } thread_t;
 

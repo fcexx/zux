@@ -30,5 +30,7 @@ void utoa(uint32_t value, char* str, int base);
 int atoi(const char* str);
 void reverse(char* str, size_t length);
 
+size_t strnlen(const char* s, size_t maxlen);
+
 
 #endif // STRING_H

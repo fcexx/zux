@@ -393,3 +393,12 @@ char* strtok(char* str, const char* delim) {
     
     return token_start;
 }
+
+size_t strnlen(const char* s, size_t maxlen) {
+    size_t i = 0;
+    if (!s) return 0;
+    while (i < maxlen && s[i] != '\0') {
+        i++;
+    }
+    return i;
+}

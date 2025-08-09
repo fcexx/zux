@@ -235,8 +235,12 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
     
     thread_init();
 
+    vbedbuff_swap();
+
     ata_init();
-    iothread_init(); // ���樠�����㥬 I/O �����஢騪
+    iothread_init();
+
+    vbedbuff_swap();
 
     // ���樠�����㥬 䠩����� ��⥬� ⮫쪮 ��᫥ ATA
     kprintf("Initializing filesystem...\n");
@@ -248,32 +252,106 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
     }
     list_directory_contents("/");            
 
+    vbedbuff_swap();
+
     // ���樠������ GDT/TSS
     gdt_init();
     // �뤥�塞 � ����ࠨ���� kernel-�⥪ ��� �������� (current) ��⮪�, ���� �� ���室� �� ring3 �� IRQ �㤥� �㫥��� rsp0
-    void* kstack = kmalloc(16384);
+    void* kstack = kmalloc_aligned(16384, 4096);
+    if (!kstack) {
+        PrintQEMU("[tss] kmalloc_aligned(16K) failed\n");
+    }
     uint64_t kstack_top = (uint64_t)kstack + 16384;
-    thread_current()->kernel_stack = kstack_top;
+    PrintfQEMU("[tss] kstack=%p kstack_top=0x%llx\n", kstack, (unsigned long long)kstack_top);
+    if (kstack) memset(kstack, 0xCD, 16384);
+    thread_t* cur = thread_current();
+    if (cur) {
+        cur->kernel_stack = kstack_top;
+    } else {
+        PrintQEMU("[tss] WARN: thread_current()==nullptr\n");
+    }
     tss_set_rsp0(kstack_top);
-
-    // ���樠������ ��⥬��� �맮��� (int 0x80)
-    syscall_init();
-
+    PrintfQEMU("[tss] rsp0 set to 0x%llx\n", (unsigned long long)kstack_top);
+ 
+     // Инициализация системных вызовов (int 0x80 и путь x86_64 SYSCALL)
+     PrintQEMU("[syscall] init int80...\n");
+     syscall_init();
+     PrintQEMU("[syscall] init x86_64 SYSCALL...\n");
+     syscall_x64_init();
+     PrintQEMU("[syscall] init done\n");
+     vbedbuff_swap();
+ 
     kprintf("OS is ready; enabling interrupts\n\n");
     asm volatile("sti");
 
     // ����㧪� ELF �� FAT32 � ����� � userspace
     uint64_t elf_entry = 0, ustack_top = 0;
-    if (elf64_load_process("/boot/user.elf", 1 << 20, &elf_entry, &ustack_top) == 0) {
+    PrintfQEMU("Loading /bin/sh...\n");
+    if (elf64_load_process("/bin/busybox", 1 << 20, &elf_entry, &ustack_top) == 0) {
         PrintfQEMU("[elf] loaded: entry=0x%llx, ustack=0x%llx\n", (unsigned long long)elf_entry, (unsigned long long)ustack_top);
-        // Регистрируем пользовательский процесс в списке системных потоков
-        thread_register_user(elf_entry, ustack_top, "user.elf");
+        // Построить стек: argc=1, argv[0]="/bin/sh", envp=NULL, auxv {PHDR,PHENT,PHNUM,ENTRY,PAGESZ,RANDOM,NULL}
+        uint64_t sp = ustack_top;
+        const char path_sh[] = "/bin/busybox";
+        const uint64_t path_len = sizeof(path_sh); // с NUL
+        sp -= path_len;
+        memcpy((void*)sp, path_sh, path_len);
+        uint64_t arg0 = sp;
+        // Сгенерировать 16 байт для AT_RANDOM
+        uint8_t rnd[16];
+        uint64_t t = pit_ticks ? pit_ticks : 1234567;
+        for (int i=0;i<16;i++){
+            uint64_t mix = (t >> ((i * 5) % 32)) ^ (uint64_t)(0x9eU + (unsigned)(3 * i));
+            rnd[i] = (uint8_t)mix;
+        }
+        sp -= sizeof(rnd);
+        memcpy((void*)sp, rnd, sizeof(rnd));
+        uint64_t at_random_ptr = sp;
+        // Выравнивание стека на 16
+        sp &= ~0xFULL;
+        // Константы auxv
+        const uint64_t AT_NULL=0, AT_PAGESZ=6, AT_PHDR=3, AT_PHENT=4, AT_PHNUM=5, AT_ENTRY=9, AT_RANDOM=25;
+        // Значения для auxv
+        uint64_t at_phdr = (0x20000000ULL /* load_base */) + 64; // e_phoff=64
+        uint64_t at_phent = 56;
+        uint64_t at_phnum = 7;
+        uint64_t at_entry = elf_entry;
+        // Вектор: argc, argv[], NULL, envp NULL, auxv пары...
+        uint64_t vec[2 /*argc*/ + 2 /*argv0,NULL*/ + 1 /*env null*/ + 2*6 /*aux pairs*/];
+        size_t idx = 0;
+        vec[idx++] = 1;        // argc
+        vec[idx++] = arg0;     // argv[0]
+        vec[idx++] = 0;        // argv NULL
+        vec[idx++] = 0;        // envp NULL
+        // auxv
+        vec[idx++] = AT_PHDR;   vec[idx++] = at_phdr;
+        vec[idx++] = AT_PHENT;  vec[idx++] = at_phent;
+        vec[idx++] = AT_PHNUM;  vec[idx++] = at_phnum;
+        vec[idx++] = AT_ENTRY;  vec[idx++] = at_entry;
+        vec[idx++] = AT_PAGESZ; vec[idx++] = 4096;
+        vec[idx++] = AT_RANDOM; vec[idx++] = at_random_ptr;
+        vec[idx++] = AT_NULL;   vec[idx++] = 0;
+        sp -= idx * 8ULL;
+        memcpy((void*)sp, vec, idx*8ULL);
+         // Зарезервируем TLS‑страницу рядом со стеком (FS будет установлен через arch_prctl)
+         uint64_t tls_va = (ustack_top & ~0xFFFFFULL) - 0x1000ULL; // страница ниже ближайшей 1Мб границы
+         void* tls_page = kmalloc(0x2000);
+         if (tls_page) {
+             uint64_t tls_phys = ((uint64_t)tls_page + 0xFFFULL) & ~0xFFFULL;
+             paging_map_page(tls_va, tls_phys, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+             memset((void*)tls_va, 0, 0x1000);
+         }
+         // Регистрируем пользовательский процесс и входим
+         thread_register_user(elf_entry, sp, "busybox");
         PrintfQEMU("[enter_user] rip=0x%llx rsp=0x%llx cs=0x%x ss=0x%x\n",
                    (unsigned long long)elf_entry,
-                   (unsigned long long)ustack_top,
+                   (unsigned long long)sp,
                    (unsigned)USER_CS,
                    (unsigned)USER_DS);
-        enter_user_mode(elf_entry, ustack_top);
+        asm volatile(
+            "xor %%rbx, %%rbx; xor %%rdi, %%rdi; xor %%rsi, %%rsi; xor %%rdx, %%rdx;\n"
+            "xor %%r12, %%r12; xor %%r13, %%r13; xor %%r14, %%r14; xor %%r15, %%r15;\n"
+            :::"rbx","rdi","rsi","rdx","r12","r13","r14","r15");
+        enter_user_mode(elf_entry, sp);
     } else {
         kprintf("ELF load failed\n");
     }

@@ -118,11 +118,21 @@ heap_block_header* HeapAllocator::find_best_fit(size_t size) {
         bucket = NUM_BUCKETS - 1;
     }
     
+    // helper: check that header pointer lies within heap data span
+    auto is_header_within_heap = [this](const heap_block_header* h) -> bool {
+        const uint8_t* u = reinterpret_cast<const uint8_t*>(h);
+        return u >= this->heap_mem_start && (u + sizeof(heap_block_header)) <= this->heap_mem_end;
+    };
+    
     // Search in current bucket first
     for (size_t b = bucket; b < NUM_BUCKETS; b++) {
         heap_block_header* head = free_lists[b];
         while (head) {
-            if (head->is_free && head->size >= size && validate_block(head)) {
+            if (!is_header_within_heap(head)) {
+                // corrupted list; stop scanning this bucket to avoid faults
+                break;
+            }
+            if (validate_block(head) && head->is_free && head->size >= size) {
                 return head;
             }
             head = head->next;
@@ -133,7 +143,10 @@ heap_block_header* HeapAllocator::find_best_fit(size_t size) {
     for (size_t b = (bucket == 0 ? 0 : bucket - 1); b < bucket; b--) {
         heap_block_header* head = free_lists[b];
         while (head) {
-            if (head->is_free && head->size >= size && validate_block(head)) {
+            if (!is_header_within_heap(head)) {
+                break;
+            }
+            if (validate_block(head) && head->is_free && head->size >= size) {
                 return head;
             }
             head = head->next;
@@ -147,7 +160,6 @@ heap_block_header* HeapAllocator::find_best_fit(size_t size) {
 // Split large block if needed (optimized for minimal fragmentation)
 heap_block_header* HeapAllocator::split_block(heap_block_header* block, size_t requested_size) {
     if (!block || !validate_block(block)) return nullptr;
-    PrintfQEMU("[heap] split_block: block=%p size=%zu requested=%zu\n", block, block->size, requested_size);
     
     // Don't split if remaining size is too small
     size_t remaining_size = block->size - requested_size;
@@ -180,7 +192,6 @@ heap_block_header* HeapAllocator::split_block(heap_block_header* block, size_t r
     add_to_free_list(new_block);
     
     stats.block_count++;
-    PrintfQEMU("[heap] split_block: allocated=%p size=%zu, remainder=%p size=%zu\n", block, block->size, new_block, new_block->size);
     
     return block;
 }
@@ -344,36 +355,57 @@ void* HeapAllocator::malloc_aligned(size_t size, size_t alignment) {
     
     // Remove from free list
     remove_from_free_list(block);
+
+    // Preserve original span
+    uint8_t* original_payload_start = reinterpret_cast<uint8_t*>(block) + sizeof(heap_block_header);
+    size_t   original_payload_size  = block->size; // bytes available after header
+    uint8_t* original_payload_end   = original_payload_start + original_payload_size;
     
-    // Calculate aligned address
-    uint64_t block_addr = reinterpret_cast<uint64_t>(block) + sizeof(heap_block_header);
+    // Calculate aligned address for payload
+    uint64_t block_addr = reinterpret_cast<uint64_t>(original_payload_start);
     uint64_t aligned_addr = (block_addr + alignment - 1) & ~(alignment - 1);
     
-    // Split block if needed
-    size_t offset = aligned_addr - block_addr;
-    if (offset > 0) {
-        // Create header for alignment padding
+    // Left padding before aligned block
+    size_t left_padding = static_cast<size_t>(aligned_addr - block_addr);
+
+    // If left padding exists, turn it into a free block
+    if (left_padding >= MIN_BLOCK_SIZE) {
         heap_block_header* padding_block = block;
-        padding_block->size = offset - sizeof(heap_block_header);
+        padding_block->size = left_padding - sizeof(heap_block_header);
         padding_block->is_free = 1;
         padding_block->magic = MAGIC_NUMBER;
         padding_block->next = nullptr;
         padding_block->prev = nullptr;
-        
         add_to_free_list(padding_block);
-        
-        // Update main block
         block = reinterpret_cast<heap_block_header*>(aligned_addr - sizeof(heap_block_header));
-        block->size = size;
-        block->is_free = 0;
         block->magic = MAGIC_NUMBER;
-        block->next = nullptr;
-        block->prev = nullptr;
-        
         stats.block_count++;
     } else {
-        block->size = size;
-        block->is_free = 0;
+        // consume padding inside the same header by shifting start without creating a tiny free block
+        block = reinterpret_cast<heap_block_header*>(aligned_addr - sizeof(heap_block_header));
+        block->magic = MAGIC_NUMBER;
+    }
+
+    // Now 'block' points to header of the aligned allocation
+    block->is_free = 0;
+    block->size = size;
+    block->next = nullptr;
+    block->prev = nullptr;
+
+    // Create trailing remainder block if there is enough space after the allocated region
+    uint8_t* used_payload_end = reinterpret_cast<uint8_t*>(aligned_addr) + size;
+    if (used_payload_end < original_payload_end) {
+        size_t trailing_size_total = static_cast<size_t>(original_payload_end - used_payload_end);
+        if (trailing_size_total > sizeof(heap_block_header) + MIN_BLOCK_SIZE) {
+            heap_block_header* trailing = reinterpret_cast<heap_block_header*>(used_payload_end);
+            trailing->magic = MAGIC_NUMBER;
+            trailing->is_free = 1;
+            trailing->size = trailing_size_total - sizeof(heap_block_header);
+            trailing->next = nullptr;
+            trailing->prev = nullptr;
+            add_to_free_list(trailing);
+            stats.block_count++;
+        }
     }
     
     // Update statistics
@@ -527,12 +559,12 @@ void* HeapAllocator::allocate_small(size_t size) {
             for (size_t i = 0; i < num_words; i++) {
                 uint64_t bitmap = pool->bitmap[size_class][i];
                 if (bitmap != 0) {
-                int bit_pos = __builtin_ctzll(bitmap);
+                    int bit_pos = __builtin_ctzll(bitmap);
                     size_t slot_index = i * 64 + static_cast<size_t>(bit_pos);
                     if (slot_index >= num_slots) break;
-                pool->bitmap[size_class][i] &= ~(1ULL << bit_pos);
+                    pool->bitmap[size_class][i] &= ~(1ULL << bit_pos);
                     size_t offset = slot_index * slot_size;
-                return pool->data + offset;
+                    return pool->data + offset;
                 }
             }
         }
@@ -572,8 +604,8 @@ void HeapAllocator::deallocate_small(void* ptr) {
             size_t num_words = (num_slots + 63) / 64;
             size_t slot_index = offset / slot_size;
             if ((offset % slot_size) == 0 && slot_index < num_slots) {
-                    size_t bitmap_index = slot_index / 64;
-                    size_t bit_pos = slot_index % 64;
+                size_t bitmap_index = slot_index / 64;
+                size_t bit_pos = slot_index % 64;
                 if (bitmap_index < num_words) {
                     pool->bitmap[size_class][bitmap_index] |= (1ULL << bit_pos);
                 }

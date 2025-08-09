@@ -112,6 +112,8 @@ void gdt_init() {
 
 void tss_set_rsp0(uint64_t rsp0) {
     tss.rsp0 = rsp0;
+    extern uint64_t syscall_kernel_rsp0;
+    syscall_kernel_rsp0 = rsp0;
 }
 
 void enter_user_mode(uint64_t user_entry, uint64_t user_stack_top) {
