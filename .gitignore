@@ -1,0 +1,33 @@
+# Build artifacts
+build/
+*.o
+*.obj
+*.elf
+*.bin
+*.map
+
+# Disk images and VM artifacts
+solar.img
+solar.vmdk
+solar.vmdk.lck/
+*.img
+*.vmdk
+
+# Toolchains and archives
+toolchains/
+*.tgz
+*.tar
+*.tar.gz
+
+# Local binaries copied into hda (runtime-only)
+hda/bin/
+# Keep kernel image in repo if you want; comment next line to track it
+# hda/boot/solarImg
+
+# Editor/OS junk
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/ 
