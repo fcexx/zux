@@ -4,6 +4,7 @@
 .extern syscall_kernel_rsp0
 .extern exec_new_rip
 .extern exec_new_rsp
+.extern exec_trampoline
 .extern syscall_saved_user_rsp
 .extern syscall_saved_user_rcx
 
@@ -45,9 +46,10 @@ syscall_entry:
     call syscall_entry_c
     add rsp, 8
 
-    // Check for exec trampoline: rax == -2
-    cmp rax, -2
-    jne 1f
+    // Check for exec trampoline flag
+    mov rax, qword ptr [rip + exec_trampoline]
+    test rax, rax
+    je 1f
     // Compute RFLAGS value into r11 (ensure bit1=1, NT=0)
     mov r11, qword ptr [r13 + 0]
     or r11, 0x2
@@ -62,12 +64,14 @@ syscall_entry:
     pop rbp
     // Build IRET frame and return to new user entry/stack
     push 0x23                       // SS
-    mov rdx, qword ptr [rip + exec_new_rsp]
-    push rdx                        // RSP
+    mov rdi, qword ptr [rip + exec_new_rsp]
+    push rdi                        // RSP
     push r11                        // RFLAGS
     push 0x1b                       // CS
-    mov rcx, qword ptr [rip + exec_new_rip]
-    push rcx                        // RIP
+    mov rsi, qword ptr [rip + exec_new_rip]
+    push rsi                        // RIP
+    // clear trampoline flag
+    mov qword ptr [rip + exec_trampoline], 0
     iretq
 1:
     // Restore user state and return via IRET
@@ -75,10 +79,13 @@ syscall_entry:
     mov r11, qword ptr [r13 + 0]
     or r11, 0x2
     and r11, ~0x4000
-    // Build IRET frame last: SS,RSP,RFLAGS,CS,RIP
-    // Use globals saved at entry for accuracy
-    mov rdx, qword ptr [rip + syscall_saved_user_rsp]
-    mov rcx, qword ptr [rip + syscall_saved_user_rcx]
+    // Restore volatile argument regs per Linux SYSCALL ABI (rcx,r11 are handled separately)
+    mov rdi, qword ptr [r13 + 64]    // a1
+    mov rsi, qword ptr [r13 + 56]    // a2
+    mov rdx, qword ptr [r13 + 48]    // a3
+    mov r10, qword ptr [r13 + 40]    // a4
+    mov r8,  qword ptr [r13 + 32]    // a5
+    mov r9,  qword ptr [r13 + 24]    // a6
     // Skip syscall frame and restore callee-saved regs before switching privilege
     lea rsp, [r13 + 80]
     pop r15
@@ -87,9 +94,10 @@ syscall_entry:
     pop r12
     pop rbx
     pop rbp
+    // Build IRET frame last: SS,RSP,RFLAGS,CS,RIP (use saved globals)
     push 0x23
-    push rdx
+    push qword ptr [rip + syscall_saved_user_rsp]
     push r11
     push 0x1b
-    push rcx
+    push qword ptr [rip + syscall_saved_user_rcx]
     iretq

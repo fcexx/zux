@@ -10,11 +10,13 @@
 #include <paging.h>
 #include <heap.h>
 #include <elf.h>
+#include <stddef.h>
 
 extern "C" { uint64_t syscall_kernel_rsp0 = 0; } // обновляется в tss_set_rsp0
 extern "C" void syscall_entry();             // из assembly
 extern "C" uint64_t exec_new_rip = 0;        // для trampolining из asm
 extern "C" uint64_t exec_new_rsp = 0;        // для trampolining из asm
+extern "C" volatile uint64_t exec_trampoline = 0; // флаг для asm: выполнять trampolining
 extern "C" uint64_t syscall_saved_user_rsp = 0; // сохраняется в asm на входе SYSCALL
 extern "C" uint64_t syscall_saved_user_rcx = 0; // сохраняется в asm на входе SYSCALL
 
@@ -26,6 +28,7 @@ static long sys_open(const char* path, int flags);
 static long sys_read(int fd, void* buf, unsigned long len);
 static long sys_close(int fd);
 static long sys_seek(int fd, int off, int whence);
+static long sys_writev(int fd, const void* iov, unsigned long iovcnt);
 static void sys_sleep(unsigned long ms);
 static long sys_openat(int dirfd, const char* path, int flags, int mode);
 static long sys_stat_path(const char* path, void* user_stat);
@@ -42,10 +45,12 @@ static long sys_gettimeofday(void* tv, void* tz);
 static long sys_clock_gettime(int clockid, void* ts);
 static long sys_nanosleep(const void* req, void* rem);
 static uint64_t sys_mmap_impl(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags, uint64_t /*fd*/, uint64_t /*off*/);
+static uint64_t sys_mremap_impl(uint64_t old_addr, uint64_t old_len, uint64_t new_len, uint64_t flags, uint64_t new_addr);
+static long sys_madvise(uint64_t addr, uint64_t len, int advice);
 static long sys_mprotect_impl(uint64_t /*addr*/, uint64_t /*len*/, uint64_t /*prot*/);
 static long sys_munmap_impl(uint64_t /*addr*/, uint64_t /*len*/);
 static long sys_brk_impl(uint64_t newbrk);
-static uint64_t sys_execve(const char* path, const char* const* argv, const char* const* envp);
+extern "C" uint64_t sys_execve(const char* path, const char* const* argv, const char* const* envp);
 static long sys_arch_prctl(long code, uint64_t addr);
 static long sys_set_tid_address(uint64_t tidptr);
 static long sys_futex(uint64_t /*uaddr*/, int /*op*/, uint64_t /*val*/, uint64_t /*timeout*/, uint64_t /*uaddr2*/, uint64_t /*val3*/);
@@ -53,11 +58,16 @@ static long sys_access(const char* path, int /*mode*/);
 static long sys_readlink(const char* path, char* buf, unsigned long bufsz);
 static long sys_unlink(const char* /*path*/);
 static long sys_mkdir(const char* /*path*/, int /*mode*/);
+// --- TTY support (/dev/tty) ---
+extern "C" char g_tty_private_tag;
+static inline bool is_tty_file(fs_file_t* f){ return f && f->private_data == &g_tty_private_tag; }
+static inline bool is_tty_fd(int fd){ thread_t* t = thread_current(); return t && fd >= 0 && fd < THREAD_MAX_FD && is_tty_file(t->fds[fd]); }
 static long sys_rmdir(const char* /*path*/);
 static long sys_rename(const char* /*oldp*/, const char* /*newp*/);
 static long sys_truncate(const char* /*path*/, long /*length*/);
 static long sys_ftruncate(int /*fd*/, unsigned long /*length*/);
-static long sys_ioctl(int /*fd*/, unsigned int /*cmd*/, unsigned long /*arg*/);
+// console/tty-aware ioctl
+static long sys_ioctl(int fd, unsigned int cmd, unsigned long arg);
 static long sys_umask(int mode);
 static long sys_getuid();
 static long sys_geteuid();
@@ -69,6 +79,13 @@ static long sys_prlimit64(int /*pid*/, int /*resource*/, const void* /*new_limit
 static long sys_set_robust_list(void* /*head*/, size_t /*len*/);
 static long sys_prctl(long /*option*/, unsigned long /*arg2*/, unsigned long /*arg3*/, unsigned long /*arg4*/, unsigned long /*arg5*/);
 static long sys_faccessat(int dirfd, const char* path, int mode, int /*flags*/);
+
+// console I/O helpers and tty constants
+extern "C" char kgetc();
+extern "C" int kgetc_available();
+struct linux_winsize { unsigned short ws_row, ws_col, ws_xpixel, ws_ypixel; };
+static constexpr unsigned int LINUX_TCGETS = 0x5401;
+static constexpr unsigned int LINUX_TIOCGWINSZ = 0x5413;
 
 struct SyscallFrame {
     uint64_t user_r11;
@@ -103,7 +120,7 @@ extern "C" uint64_t syscall_entry_c(SyscallFrame* f){
     if ((nr & 0xFFF00000ull) == 0x00200000ull) nr &= 0x000FFFFFull;
     // Поддержка Linux x32 ABI: системные вызовы пронумерованы "базовый+512"
     if (nr >= 512 && nr < 1024) nr -= 512;
-    PrintfQEMU("syscall num: %u\n", nr);
+    //PrintfQEMU("syscall num: %u\n", nr);
     switch (nr) {
         // Linux x86_64 ABI core
         case 0:  /* read   */ return (uint64_t)sys_read((int)f->a1, (void*)f->a2, f->a3);
@@ -121,9 +138,12 @@ extern "C" uint64_t syscall_entry_c(SyscallFrame* f){
         case 12: /* brk    */ return (uint64_t)sys_brk_impl(f->a1);
         case 13: /* rt_sigaction (stub) */ return 0;
         case 14: /* rt_sigprocmask (stub) */ return 0;
+        case 20: /* writev */ return (uint64_t)sys_writev((int)f->a1, (const void*)f->a2, f->a3);
         case 16: /* ioctl (stub) */ return (uint64_t)sys_ioctl((int)f->a1, (unsigned int)f->a2, f->a3);
         case 21: /* access */ return (uint64_t)sys_access((const char*)f->a1, (int)f->a2);
         case 24: /* sched_yield */ sys_yield(); return 0;
+        case 28: /* madvise */ return (uint64_t)sys_madvise(f->a1, f->a2, (int)f->a3);
+        case 25: /* mremap */ return (uint64_t)sys_mremap_impl(f->a1, f->a2, f->a3, f->a4, f->a5);
         case 35: /* nanosleep */ return (uint64_t)sys_nanosleep((const void*)f->a1, (void*)f->a2);
         case 39: /* getpid */ return (uint64_t)sys_getpid();
         case 59: /* execve */ return (uint64_t)sys_execve((const char*)f->a1, (const char* const*)f->a2, (const char* const*)f->a3);
@@ -180,7 +200,8 @@ extern "C" uint64_t syscall_entry_c(SyscallFrame* f){
         case 302: /* prlimit64 */ return (uint64_t)sys_prlimit64((int)f->a1, (int)f->a2, (const void*)f->a3, (void*)f->a4);
         case 318: /* getrandom (stub) */ {
             uint8_t* p = (uint8_t*)f->a1; unsigned long n = f->a2;
-            if (!p) return -22; for (unsigned long i=0;i<n;i++) p[i]=(uint8_t)((pit_ticks>>((i*7)%32))^0x5a);
+            if (!p) return -22;
+            for (unsigned long i=0;i<n;i++) p[i]=(uint8_t)((pit_ticks>>((i*7)%32))^0x5a);
             return (long)n; }
         default:
             PrintfQEMU("syscall64: unknown nr=%llu (raw=%llu)\n", (unsigned long long)nr, (unsigned long long)nr_raw);
@@ -222,12 +243,52 @@ void syscall_x64_init(){
 
 static void sys_yield() { thread_yield(); }
 
-static long sys_write(int fd, const char* buf, unsigned long len) {
-    if (fd != 1 || !buf || len == 0) return -1;
-    for (unsigned long i = 0; i < len; ++i) {
-        vbetty_put_char(buf[i]);
+static long sys_write(int fd, const char* buf, unsigned long len){
+    PrintfQEMU("[write] fd=%d buf=0x%llx len=%llu\n", fd, (unsigned long long)(uint64_t)buf, (unsigned long long)len);
+    if (fd == 1 || fd == 2 || is_tty_fd(fd)) {
+        if (!buf || len == 0) return 0;
+        if (fd == 2) {
+            unsigned long n = len < 64 ? len : 64;
+            kprintf("<(0c)>");
+            PrintfQEMU("[write2] ");
+            for (unsigned long i = 0; i < n; ++i) {
+                char c = buf[i];
+                if (c == '\n' || (c >= 32 && c < 127)) {
+                    vbetty_put_char(c);
+                    // дублируем в лог читаемо
+                    PrintfQEMU("%c", c);
+                } else {
+                    vbetty_put_char('.');
+                    PrintfQEMU(".");
+                }
+            }
+            PrintfQEMU("\n");
+        }
+        for (unsigned long i = 0; i < len; ++i) vbetty_put_char(buf[i]);
+        return (long)len;
     }
-    return (long)len;
+    return -1;
+}
+
+struct linux_iovec { const void* iov_base; uint64_t iov_len; };
+
+static long sys_writev(int fd, const void* iov, unsigned long iovcnt){
+    PrintfQEMU("[writev] fd=%d iov=0x%llx cnt=%llu\n", fd, (unsigned long long)(uint64_t)iov, (unsigned long long)iovcnt);
+    if (!iov || iovcnt == 0) return 0;
+    const linux_iovec* vec = (const linux_iovec*)iov;
+    if (iovcnt > 1024) iovcnt = 1024; // простая защита
+    long total = 0;
+    for (unsigned long i = 0; i < iovcnt; ++i){
+        const char* base = (const char*)vec[i].iov_base;
+        unsigned long len = (unsigned long)vec[i].iov_len;
+        if (!base || len == 0) continue;
+        PrintfQEMU("[writev] part[%llu] base=0x%llx len=%llu\n", (unsigned long long)i, (unsigned long long)(uint64_t)base, (unsigned long long)len);
+        long r = sys_write(fd, base, len);
+        if (r < 0) return (total > 0) ? total : r;
+        total += r;
+        if ((unsigned long)r < len) break; // частичная запись
+    }
+    return total;
 }
 
 static void sys_exit(int code) {
@@ -249,6 +310,17 @@ static int alloc_fd(thread_t* t, fs_file_t* f){
 
 static long sys_open(const char* path, int flags){
     if(!path) return -1;
+    // Special case: /dev/tty — controlling terminal
+    if (strcmp(path, "/dev/tty") == 0){
+        fs_file_t* f = (fs_file_t*)kmalloc(sizeof(fs_file_t));
+        if (!f) return -12; // -ENOMEM
+        memset(f, 0, sizeof(*f));
+        f->private_data = &g_tty_private_tag;
+        f->mode = flags;
+        int fd = alloc_fd(thread_current(), f);
+        if (fd < 0) { kfree(f); return -24; } // -EMFILE
+        return fd;
+    }
     fs_file_t* f = fs_open(path, flags);
     if(!f) return -1;
     int fd = alloc_fd(thread_current(), f);
@@ -257,6 +329,18 @@ static long sys_open(const char* path, int flags){
 }
 
 static long sys_read(int fd, void* buf, unsigned long len){
+    PrintfQEMU("[read] fd=%d buf=0x%llx len=%llu\n", fd, (unsigned long long)(uint64_t)buf, (unsigned long long)len);
+    // stdin or /dev/tty from keyboard buffer
+    if ((fd == 0 || is_tty_fd(fd)) && buf && len > 0) {
+        unsigned long i = 0;
+        while (i < len) {
+            if (kgetc_available() == 0) { thread_schedule(); continue; }
+            char c = kgetc();
+            reinterpret_cast<char*>(buf)[i++] = c;
+            if (c == '\n') break;
+        }
+        return (long)i;
+    }
     thread_t* t = thread_current();
     if(fd<0 || fd>=THREAD_MAX_FD || !t->fds[fd] || !buf) return -1;
     return fs_read(t->fds[fd], buf, len);
@@ -265,7 +349,9 @@ static long sys_read(int fd, void* buf, unsigned long len){
 static long sys_close(int fd){
     thread_t* t = thread_current();
     if(fd<0 || fd>=THREAD_MAX_FD || !t->fds[fd]) return -1;
-    int r = fs_close(t->fds[fd]);
+    fs_file_t* f = t->fds[fd];
+    if (is_tty_file(f)) { kfree(f); t->fds[fd]=nullptr; return 0; }
+    int r = fs_close(f);
     t->fds[fd]=nullptr;
     return r;
 }
@@ -273,6 +359,7 @@ static long sys_close(int fd){
 static long sys_seek(int fd, int off, int whence){
     thread_t* t = thread_current();
     if(fd<0 || fd>=THREAD_MAX_FD || !t->fds[fd]) return -1;
+    if (is_tty_file(t->fds[fd])) return -29; // -ESPIPE
     return fs_seek(t->fds[fd], off, whence);
 }
 
@@ -286,6 +373,16 @@ static long sys_openat(int dirfd, const char* path, int flags, int /*mode*/){
     if (!path) return -22; // -EINVAL
     // We do not support directory FDs yet; accept AT_FDCWD or absolute path
     if (dirfd != AT_FDCWD && path[0] != '/') return -9; // -EBADF (or -ENOTSUP)
+    if (strcmp(path, "/dev/tty") == 0){
+        fs_file_t* f = (fs_file_t*)kmalloc(sizeof(fs_file_t));
+        if (!f) return -12; // -ENOMEM
+        memset(f, 0, sizeof(*f));
+        f->private_data = &g_tty_private_tag;
+        f->mode = flags;
+        int fd = alloc_fd(thread_current(), f);
+        if (fd < 0) { kfree(f); return -24; } // -EMFILE
+        return fd;
+    }
     fs_file_t* f = fs_open(path, flags);
     if (!f) return -2; // -ENOENT
     int fd = alloc_fd(thread_current(), f);
@@ -333,8 +430,21 @@ static void fill_linux_stat_from_fs(const fs_stat_t* st, struct linux_stat* out)
     out->st_blksize = 4096;
 }
 
+static void fill_linux_stat_tty(struct linux_stat* out){
+    memset(out, 0, sizeof(*out));
+    const uint32_t S_IFCHR = 0020000;
+    out->st_mode = S_IFCHR | 0666;
+    out->st_nlink = 1;
+    out->st_blksize = 4096;
+}
+
 static long sys_stat_path(const char* path, void* user_stat){
     if (!path || !user_stat) return -22;
+    if (strcmp(path, "/dev/tty") == 0){
+        struct linux_stat* ls = (struct linux_stat*)user_stat;
+        fill_linux_stat_tty(ls);
+        return 0;
+    }
     fs_stat_t st;
     if (fs_stat(path, &st) != 0) return -2; // -ENOENT
     struct linux_stat* ls = (struct linux_stat*)user_stat;
@@ -351,11 +461,12 @@ static long sys_fstat_fd(int fd, void* user_stat){
     thread_t* t = thread_current();
     if (!t || fd < 0 || fd >= THREAD_MAX_FD || !t->fds[fd] || !user_stat) return -9;
     fs_file_t* f = t->fds[fd];
+    struct linux_stat* ls = (struct linux_stat*)user_stat;
+    if (is_tty_file(f)) { fill_linux_stat_tty(ls); return 0; }
     fs_stat_t st; memset(&st, 0, sizeof(st));
     st.size = f->size;
     // Attributes unknown from handle; assume regular file
     st.attributes = 0;
-    struct linux_stat* ls = (struct linux_stat*)user_stat;
     fill_linux_stat_from_fs(&st, ls);
     return 0;
 }
@@ -513,9 +624,9 @@ static long sys_nanosleep(const void* req, void* /*rem*/){
 }
 
 // --- Simple memory management for Linux ABI ---
-static uint64_t user_brk_base = 0x00900000ULL;
-static uint64_t user_brk_end  = 0x00900000ULL;
-static uint64_t mmap_next     = 0x20000000ULL; // 512MB
+static uint64_t user_brk_base = 0;
+static uint64_t user_brk_end  = 0;
+static uint64_t mmap_next     = 0x40000000ULL; // 1GB: выше зон ELF (0x20000000) и стека (0x30000000)
 
 static void map_user_pages(uint64_t va_start, uint64_t size){
     uint64_t va = va_start & ~0xFFFULL;
@@ -530,27 +641,112 @@ static void map_user_pages(uint64_t va_start, uint64_t size){
 }
 
 static long sys_brk_impl(uint64_t newbrk){
-    if (newbrk == 0) return (long)user_brk_end; // report current
-    if (newbrk < user_brk_base) return (long)user_brk_end; // do not shrink for now
-    if (newbrk > user_brk_end){
-        map_user_pages(user_brk_end, newbrk - user_brk_end);
-        user_brk_end = (newbrk + 0xFFFULL) & ~0xFFFULL;
+    extern uint64_t elf_last_brk_base;
+    if (user_brk_base == 0 && elf_last_brk_base) {
+        user_brk_base = elf_last_brk_base;
+        // Сразу выделим начальный пул кучи (256 КБ), чтобы malloc не упирался в пустоту
+        uint64_t initial = 0x40000ULL; // 256KB
+        map_user_pages(user_brk_base, initial);
+        user_brk_end  = (user_brk_base + initial + 0xFFFULL) & ~0xFFFULL;
+    } else if (user_brk_base == 0 && !elf_last_brk_base) {
+        // Резервная база кучи, если ELF не сообщил конец PT_LOAD
+        user_brk_base = 0x30000000ULL;
+        user_brk_end  = user_brk_base;
+        // начально промапим 64 КБ, чтобы malloc сразу получил валидную область
+        map_user_pages(user_brk_base, 0x10000);
+        user_brk_end = user_brk_base + 0x10000ULL;
     }
-    return (long)user_brk_end;
+    if (newbrk == 0) {
+        PrintfQEMU("[brk] query: base=0x%llx end=0x%llx -> ret=0x%llx\n",
+                   (unsigned long long)user_brk_base,
+                   (unsigned long long)user_brk_end,
+                   (unsigned long long)user_brk_end);
+        return (long)user_brk_end; // сообщаем текущий brk
+    }
+    if (newbrk < user_brk_base) return (long)user_brk_end; // сжатие пока игнорируем
+    if (newbrk > user_brk_end){
+        // выровняем вверх до страниц
+        uint64_t prev_end = user_brk_end;
+        uint64_t need_end = (newbrk + 0xFFFULL) & ~0xFFFULL;
+        // запас 1 МБ, чтобы избежать частых расширений
+        uint64_t slack = 0x100000ULL;
+        uint64_t target_end = need_end + slack;
+        if (target_end < need_end) target_end = need_end; // защититься от переполнения
+        if (target_end > prev_end) {
+            map_user_pages(prev_end, target_end - prev_end);
+        }
+        user_brk_end = target_end;
+        PrintfQEMU("[brk] grow: prev_end=0x%llx need_end=0x%llx target_end=0x%llx (map %llu KB)\n",
+                   (unsigned long long)prev_end,
+                   (unsigned long long)need_end,
+                   (unsigned long long)target_end,
+                   (unsigned long long)((target_end - prev_end)/1024ULL));
+    }
+    PrintfQEMU("[brk] base=0x%llx end=0x%llx req=0x%llx -> ret=0x%llx\n",
+               (unsigned long long)user_brk_base,
+               (unsigned long long)user_brk_end,
+               (unsigned long long)newbrk,
+               (unsigned long long)newbrk);
+    return (long)newbrk;
 }
 
 static uint64_t sys_mmap_impl(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags, uint64_t /*fd*/, uint64_t /*off*/){
     const uint64_t MAP_PRIVATE   = 0x02;
     const uint64_t MAP_ANONYMOUS = 0x20;
+    const uint64_t MAP_FIXED     = 0x10;
     if (!(flags & MAP_ANONYMOUS)) return (uint64_t)-38; // only anonymous
     if (!(flags & MAP_PRIVATE)) return (uint64_t)-38;
     if (len == 0) return (uint64_t)-22;
     uint64_t size = (len + 0xFFFULL) & ~0xFFFULL;
-    uint64_t base = (addr ? (addr & ~0xFFFULL) : (mmap_next + 0xFFFULL) & ~0xFFFULL);
-    if (!addr){ mmap_next = base + size; }
+    uint64_t base;
+    if (flags & MAP_FIXED) {
+        base = addr & ~0xFFFULL;
+    } else {
+        // Игнорируем предложенный addr, выбираем следующее свободное окно
+        base = (mmap_next + 0xFFFULL) & ~0xFFFULL;
+        mmap_next = base + size;
+    }
     map_user_pages(base, size);
     (void)prot; // ignore for now
+    PrintfQEMU("[mmap] addr=0x%llx len=0x%llx prot=0x%llx flags=0x%llx -> base=0x%llx size=0x%llx\n",
+               (unsigned long long)addr, (unsigned long long)len,
+               (unsigned long long)prot, (unsigned long long)flags,
+               (unsigned long long)base, (unsigned long long)size);
     return base;
+}
+
+static uint64_t sys_mremap_impl(uint64_t old_addr, uint64_t old_len, uint64_t new_len, uint64_t flags, uint64_t new_addr){
+    // Linux flags: MREMAP_MAYMOVE=1, MREMAP_FIXED=2. Мы поддержим MAYMOVE, игнорируем FIXED.
+    const uint64_t MREMAP_MAYMOVE = 1;
+    const uint64_t MREMAP_FIXED   = 2;
+    if (new_len == 0) return (uint64_t)-22; // -EINVAL
+    uint64_t old_size = (old_len + 0xFFFULL) & ~0xFFFULL;
+    uint64_t new_size = (new_len + 0xFFFULL) & ~0xFFFULL;
+    // Сжатие: просто оставляем старую мапу и возвращаем старый адрес
+    if (new_size <= old_size) {
+        PrintfQEMU("[mremap] shrink old=0x%llx old_len=0x%llx -> keep same\n",
+                   (unsigned long long)old_addr, (unsigned long long)old_len);
+        return old_addr;
+    }
+    // Расширение без MAYMOVE запрещаем
+    if (!(flags & MREMAP_MAYMOVE)) return (uint64_t)-12; // -ENOMEM (как будто нельзя расширить на месте)
+    // Если FIXED запрошен — попробуем по адресу new_addr, иначе создадим новую область
+    uint64_t target = 0;
+    if (flags & MREMAP_FIXED) {
+        target = sys_mmap_impl(new_addr, new_size, /*prot*/3, /*flags*/0x02|0x20|0x10, /*fd*/0, /*off*/0);
+        if ((int64_t)target < 0) return target;
+    } else {
+        target = sys_mmap_impl(0, new_size, /*prot*/3, /*flags*/0x02|0x20, /*fd*/0, /*off*/0);
+        if ((int64_t)target < 0) return target;
+    }
+    // Скопируем данные
+    uint64_t to_copy = (old_size < new_size) ? old_size : new_size;
+    memcpy((void*)target, (const void*)old_addr, (size_t)to_copy);
+    // Теоретически можно вызвать munmap на старой области; наш sys_munmap заглушка — игнорируем
+    PrintfQEMU("[mremap] move old=0x%llx old_len=0x%llx -> new=0x%llx new_len=0x%llx\n",
+               (unsigned long long)old_addr, (unsigned long long)old_len,
+               (unsigned long long)target, (unsigned long long)new_len);
+    return target;
 }
 
 static long sys_mprotect_impl(uint64_t /*addr*/, uint64_t /*len*/, uint64_t /*prot*/){
@@ -561,7 +757,10 @@ static long sys_munmap_impl(uint64_t /*addr*/, uint64_t /*len*/){
     return 0; // ignore for now (leak)
 }
 
-static uint64_t sys_execve(const char* path, const char* const* argv, const char* const* envp){
+// madvise(2) заглушка
+static long sys_madvise(uint64_t /*addr*/, uint64_t /*len*/, int /*advice*/){ return 0; }
+
+extern "C" uint64_t sys_execve(const char* path, const char* const* argv, const char* const* envp){
     if (!path) return (uint64_t)-22; // -EINVAL
     // Copy path to kernel buffer
     size_t path_len = strlen(path);
@@ -593,7 +792,7 @@ static uint64_t sys_execve(const char* path, const char* const* argv, const char
     uint64_t entry = 0, ustack_top = 0;
     if (elf64_load_process(kpath, 1<<20, &entry, &ustack_top) != 0){
         kfree(kpath);
-        return (uint64_t)-2ll; // treat as failure? Use -ENOENT better
+        return (uint64_t)-2ll; // -ENOENT
     }
     kfree(kpath);
 
@@ -630,9 +829,15 @@ static uint64_t sys_execve(const char* path, const char* const* argv, const char
     vec[idx++] = AT_NULL;   vec[idx++] = 0;
     vec[idx++] = AT_NULL;   vec[idx++] = 0;
 
+    // Ensure SysV AMD64 ABI stack alignment at entry: RSP % 16 == 8
+    if ((sp & 0xFULL) == 0) {
+        sp -= 8ULL;
+    }
+
     exec_new_rip = entry;
     exec_new_rsp = sp;
-    return (uint64_t)-2; // special trampoline code for asm
+    exec_trampoline = 1;
+    return 0;
 }
 
 // arch_prctl for x86_64: support ARCH_SET_FS (0x1002) and ARCH_GET_FS (0x1003)
@@ -640,22 +845,20 @@ static long sys_arch_prctl(long code, uint64_t addr){
     const long ARCH_SET_FS = 0x1002;
     const long ARCH_GET_FS = 0x1003;
     if (code == ARCH_SET_FS){
-        // Промапим область TLS вокруг addr: ровно 2 страницы по выравненному адресу
+        // Опционально промапим область вокруг addr (если уже маплена, безвредно)
         uint64_t map_start = addr & ~0xFFFULL;
         uint64_t map_size  = 0x2000ULL;
         extern void map_user_pages(uint64_t va_start, uint64_t size);
         map_user_pages(map_start, map_size);
-        // Мини-инициализация TCB в TLS: self-pointer и errno-слот
-        uint64_t tcb = addr;
-        // FS:0 = self pointer (TCB* -> на сам TLS-блок)
-        *(uint64_t*)(tcb + 0x00) = tcb;
-        // По смещению +0xa8 хранится указатель на errno (int*)
-        *(uint64_t*)(tcb + 0xa8) = tcb + 0x100;
-        *(uint32_t*)(tcb + 0x100) = 0; // errno = 0
-        PrintfQEMU("[arch_prctl] ARCH_SET_FS = 0x%llx (mapped 0x%llx-0x%llx)\n",
+        PrintfQEMU("[arch_prctl] ARCH_SET_FS = 0x%llx (map hint 0x%llx-0x%llx)\n",
                    (unsigned long long)addr,
                    (unsigned long long)map_start,
                    (unsigned long long)(map_start + map_size));
+        // Минимальный TCB: FS:0 должно указывать само на себя
+        if (addr) {
+            uint64_t* tcb = (uint64_t*)(uint64_t)addr;
+            tcb[0] = addr; // self
+        }
         // Установим FS base через WRMSR (IA32_FS_BASE)
         const uint32_t IA32_FS_BASE = 0xC0000100;
         uint32_t lo = (uint32_t)(addr & 0xFFFFFFFFu);
@@ -694,6 +897,7 @@ static uint32_t g_umask = 0022;
 
 static long sys_access(const char* path, int /*mode*/){
     if (!path) return -22; // -EINVAL
+    if (strcmp(path, "/dev/tty") == 0) return 0;
     fs_stat_t st;
     return (fs_stat(path, &st) == 0) ? 0 : -2; // -ENOENT
 }
@@ -715,7 +919,43 @@ static long sys_rmdir(const char* /*path*/){ return -30; } // -EROFS
 static long sys_rename(const char* /*oldp*/, const char* /*newp*/){ return -30; } // -EROFS
 static long sys_truncate(const char* /*path*/, long /*length*/){ return 0; }
 static long sys_ftruncate(int /*fd*/, unsigned long /*length*/){ return 0; }
-static long sys_ioctl(int /*fd*/, unsigned int /*cmd*/, unsigned long /*arg*/){ return -25; } // -ENOTTY
+static long sys_ioctl(int fd, unsigned int cmd, unsigned long arg){
+    PrintfQEMU("[ioctl] fd=%d cmd=0x%x arg=0x%llx\n", fd, cmd, (unsigned long long)arg);
+    thread_t* t = thread_current();
+    if (fd < 0 || fd >= THREAD_MAX_FD || !t->fds[fd]) return -9; // -EBADF
+    if (is_tty_file(t->fds[fd])){
+        if (cmd == LINUX_TCGETS) {
+            struct termios_linux { unsigned int iflag, oflag, cflag, lflag; unsigned char line; unsigned char cc[32]; unsigned int ispeed, ospeed; };
+            termios_linux* p = (termios_linux*)(uint64_t)arg;
+            if (!p) return -14; // -EFAULT
+            memset(p, 0, sizeof(*p));
+            return 0;
+        }
+        if (cmd == LINUX_TIOCGWINSZ){
+            struct winsz { unsigned short rows, cols, xpixel, ypixel; };
+            winsz* w = (winsz*)(uint64_t)arg;
+            if (!w) return -14;
+            w->rows = 25; w->cols = 80; w->xpixel = 640; w->ypixel = 480;
+            return 0;
+        }
+        return -25; // -ENOTTY for unsupported tty ioctls
+    }
+    if (cmd == LINUX_TCGETS) {
+        struct termios_linux { unsigned int iflag, oflag, cflag, lflag; unsigned char line; unsigned char cc[32]; unsigned int ispeed, ospeed; };
+        termios_linux* p = (termios_linux*)(uint64_t)arg;
+        if (!p) return -14; // -EFAULT
+        memset(p, 0, sizeof(*p));
+        return 0;
+    }
+    if (cmd == LINUX_TIOCGWINSZ){
+        struct winsz { unsigned short rows, cols, xpixel, ypixel; };
+        winsz* w = (winsz*)(uint64_t)arg;
+        if (!w) return -14;
+        w->rows = 25; w->cols = 80; w->xpixel = 640; w->ypixel = 480;
+        return 0;
+    }
+    return 0;
+}
 
 static long sys_umask(int mode){
     int old = (int)g_umask; g_umask = (uint32_t)(mode & 0777); return old;
@@ -730,7 +970,7 @@ struct linux_rlimit { uint64_t rlim_cur; uint64_t rlim_max; };
 static long sys_getrlimit(int /*resource*/, void* rlim_user){
     if (!rlim_user) return -22; // -EINVAL
     linux_rlimit* r = (linux_rlimit*)rlim_user;
-    r->rlim_cur = 1ULL<<30; r->rlim_max = 1ULL<<30;
+    r->rlim_cur = ~0ULL; r->rlim_max = ~0ULL; // RLIM_INFINITY
     return 0;
 }
 static long sys_prlimit64(int /*pid*/, int /*resource*/, const void* /*new_limit*/, void* old_limit){

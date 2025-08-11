@@ -197,3 +197,10 @@ bool fs_is_initialized() {
 fs_interface_t* fs_get_current() {
     return &current_fs;
 }
+
+void fs_set_current(fs_interface_t* newfs){
+    if (newfs){
+        memcpy(&current_fs, newfs, sizeof(fs_interface_t));
+        fs_initialized = true;
+    }
+}

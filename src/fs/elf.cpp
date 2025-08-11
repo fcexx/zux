@@ -8,6 +8,16 @@
 // minimal uintptr_t for freestanding
 typedef unsigned long long uintptr_t;
 
+// Экспорт auxv параметров последней загруженной программы
+extern "C" uint64_t elf_last_at_phdr  = 0;
+extern "C" uint64_t elf_last_at_phent = 0;
+extern "C" uint64_t elf_last_at_phnum = 0;
+extern "C" uint64_t elf_last_at_entry = 0;
+// База для brk: конец PT_LOAD (выровненный вверх)
+extern "C" uint64_t elf_last_brk_base = 0;
+// База загрузки последней программы (для эвристик ребейза адресов в #GP)
+extern "C" uint64_t elf_last_load_base = 0;
+
 // Простой статический пул страниц (2 МБ) для маппинга ELF и пользовательского стека
 static uint8_t elf_page_pool[2 * 1024 * 1024] __attribute__((aligned(4096)));
 static uint32_t elf_page_pool_used_pages = 0; // по 4К
@@ -72,6 +82,8 @@ static const int64_t DT_RELR    = 0x23; // 35
 static const int64_t DT_RELRSZ  = 0x24; // 36
 static const int64_t DT_RELRENT = 0x25; // 37
 static const uint32_t R_X86_64_RELATIVE = 8;
+static const uint32_t R_X86_64_64       = 1;
+static const uint32_t R_X86_64_GLOB_DAT = 6;
 static inline uint32_t ELF64_R_TYPE(uint64_t r_info){ return (uint32_t)(r_info & 0xFFFFFFFFu); }
 static inline uint32_t ELF64_R_SYM(uint64_t r_info){ return (uint32_t)(r_info >> 32); }
 static const unsigned EI_MAG0=0, EI_MAG1=1, EI_MAG2=2, EI_MAG3=3, EI_CLASS=4, EI_DATA=5;
@@ -125,6 +137,7 @@ int elf64_load_process(const char* path, uint64_t user_stack_size,
     if (rr_tab != phdr_table_size) { PrintfQEMU("[elf] read phdr table failed: got %d\n", rr_tab); kfree(ph_buf); fs_close(f); asm volatile("push %0; popfq"::"r"(saved_rflags):"memory"); return -1; }
 
     // Map PT_LOAD segments
+    uint64_t max_load_end = 0;
     for (int i = 0; i < eh.e_phnum; ++i) {
         Elf64_Phdr* ph = (Elf64_Phdr*)((uint8_t*)ph_buf + i * eh.e_phentsize);
         if (ph->p_type != PT_LOAD) continue;
@@ -156,16 +169,13 @@ int elf64_load_process(const char* path, uint64_t user_stack_size,
             uint8_t* dst = (uint8_t*)(uintptr_t)(load_base + ph->p_vaddr);
             static uint8_t kbuf_static[4096] __attribute__((aligned(16)));
             const size_t CHUNK = sizeof(kbuf_static);
-            uint64_t file_off = ph->p_offset;
             while (remaining) {
                 size_t want = (remaining > CHUNK) ? CHUNK : (size_t)remaining;
-                if (fs_seek(f, (int)file_off, FS_SEEK_SET) < 0) { kfree(ph_buf); fs_close(f); asm volatile("push %0; popfq"::"r"(saved_rflags):"memory"); return -1; }
                 int rr = fs_read(f, kbuf_static, want);
-                if (rr != (int)want) { kfree(ph_buf); fs_close(f); asm volatile("push %0; popfq"::"r"(saved_rflags):"memory"); return -1; }
-                memcpy(dst, kbuf_static, want);
-                dst += want;
-                file_off += want;
-                remaining -= want;
+                if (rr <= 0) { kfree(ph_buf); fs_close(f); asm volatile("push %0; popfq"::"r"(saved_rflags):"memory"); return -1; }
+                memcpy(dst, kbuf_static, (size_t)rr);
+                dst += (size_t)rr;
+                remaining -= (uint64_t)rr;
             }
         }
         if (ph->p_memsz > ph->p_filesz) {
@@ -173,6 +183,8 @@ int elf64_load_process(const char* path, uint64_t user_stack_size,
             uint64_t bss_len   = ph->p_memsz - ph->p_filesz;
             memset((void*)(uintptr_t)bss_start, 0, bss_len);
         }
+        uint64_t seg_end = load_base + ph->p_vaddr + ph->p_memsz;
+        if (seg_end > max_load_end) max_load_end = seg_end;
     }
 
     // Если это PIE (ET_DYN), применим базовые релокации R_X86_64_RELATIVE из PT_DYNAMIC
@@ -207,6 +219,11 @@ int elf64_load_process(const char* path, uint64_t user_stack_size,
                         uint64_t* where = (uint64_t*)(uintptr_t)(load_base + rel[i].r_offset);
                         uint64_t  val   = load_base + (uint64_t)rel[i].r_addend;
                         *where = val;
+                    } else if (type == R_X86_64_64 || type == R_X86_64_GLOB_DAT) {
+                        // Для статического PIE трактуем как base+addend
+                        uint64_t* where = (uint64_t*)(uintptr_t)(load_base + rel[i].r_offset);
+                        uint64_t  val   = load_base + (uint64_t)rel[i].r_addend;
+                        *where = val;
                     }
                 }
             }
@@ -218,6 +235,10 @@ int elf64_load_process(const char* path, uint64_t user_stack_size,
                     if (type == R_X86_64_RELATIVE){
                         uint64_t* where = (uint64_t*)(uintptr_t)(load_base + rr[i].r_offset);
                         // addend хранится по адресу where
+                        uint64_t addend = *where;
+                        *where = load_base + addend;
+                    } else if (type == R_X86_64_64 || type == R_X86_64_GLOB_DAT) {
+                        uint64_t* where = (uint64_t*)(uintptr_t)(load_base + rr[i].r_offset);
                         uint64_t addend = *where;
                         *where = load_base + addend;
                     }
@@ -264,6 +285,46 @@ int elf64_load_process(const char* path, uint64_t user_stack_size,
         if (adj_entry >= start && adj_entry < end) { entry_ok = true; break; }
     }
     if (!entry_ok) { PrintfQEMU("[elf] entry 0x%llx not in PT_LOAD, forcing to 0x%llx\n", (unsigned long long)(load_base + eh.e_entry), (unsigned long long)(load_base + first_load_vaddr)); eh.e_entry = first_load_vaddr; }
+
+    // Заполним auxv-поля для ядра (AT_PHDR/AT_PHENT/AT_PHNUM/AT_ENTRY)
+    // Правильно вычислим адрес PHDR в памяти: либо через PT_PHDR, либо конвертируя e_phoff через PT_LOAD, содержащий его
+    {
+        uint64_t at_phdr_addr = 0;
+        // 1) Ищем PT_PHDR
+        for (int i = 0; i < eh.e_phnum; ++i) {
+            Elf64_Phdr* ph = (Elf64_Phdr*)((uint8_t*)ph_buf + i * eh.e_phentsize);
+            if (ph->p_type == 6 /*PT_PHDR*/){
+                at_phdr_addr = load_base + ph->p_vaddr;
+                break;
+            }
+        }
+        // 2) Если нет PT_PHDR — конвертируем e_phoff (file offset) в VA по PT_LOAD, который его покрывает
+        if (at_phdr_addr == 0){
+            for (int i = 0; i < eh.e_phnum; ++i) {
+                Elf64_Phdr* ph = (Elf64_Phdr*)((uint8_t*)ph_buf + i * eh.e_phentsize);
+                if (ph->p_type != PT_LOAD) continue;
+                uint64_t off = eh.e_phoff;
+                if (off >= ph->p_offset && off < (ph->p_offset + ph->p_filesz)){
+                    uint64_t delta = off - ph->p_offset;
+                    at_phdr_addr = load_base + ph->p_vaddr + delta;
+                    break;
+                }
+            }
+        }
+        // 3) Fallback: load_base + e_phoff (если вдруг не попали ни в один PT_LOAD)
+        if (at_phdr_addr == 0) at_phdr_addr = load_base + eh.e_phoff;
+        elf_last_at_phdr  = at_phdr_addr;
+    }
+    elf_last_at_phent = eh.e_phentsize;
+    elf_last_at_phnum = eh.e_phnum;
+    elf_last_at_entry = load_base + eh.e_entry;
+    elf_last_load_base = load_base;
+    // brk: конец PT_LOAD, выровненный по странице
+    if (max_load_end) {
+        elf_last_brk_base = (max_load_end + 0xFFFULL) & ~0xFFFULL;
+    } else {
+        elf_last_brk_base = 0;
+    }
 
     kfree(ph_buf);
     fs_close(f);

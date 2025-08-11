@@ -96,5 +96,16 @@ int fs_unlink(const char* path);
 int fs_rename(const char* old_path, const char* new_path);
 bool fs_is_initialized();
 fs_interface_t* fs_get_current();
+void fs_set_current(fs_interface_t* newfs);
+
+// VFS from cpio
+#ifdef __cplusplus
+extern "C" {
+#endif
+fs_interface_t* vfs_get_interface();
+int vfs_mount_from_cpio(const void* data, unsigned long size);
+#ifdef __cplusplus
+}
+#endif
 
 #endif // FS_INTERFACE_H 
