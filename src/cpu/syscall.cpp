@@ -17,6 +17,7 @@ extern "C" void syscall_entry();             // из assembly
 extern "C" uint64_t exec_new_rip = 0;        // для trampolining из asm
 extern "C" uint64_t exec_new_rsp = 0;        // для trampolining из asm
 extern "C" volatile uint64_t exec_trampoline = 0; // флаг для asm: выполнять trampolining
+extern "C" uint64_t exec_child_rax = 0;      // значение RAX в ребёнке после trampolining
 extern "C" uint64_t syscall_saved_user_rsp = 0; // сохраняется в asm на входе SYSCALL
 extern "C" uint64_t syscall_saved_user_rcx = 0; // сохраняется в asm на входе SYSCALL
 
@@ -30,6 +31,7 @@ static long sys_close(int fd);
 static long sys_seek(int fd, int off, int whence);
 static long sys_writev(int fd, const void* iov, unsigned long iovcnt);
 static void sys_sleep(unsigned long ms);
+static long sys_poll(void* fds_user, unsigned long nfds, int timeout_ms);
 static long sys_openat(int dirfd, const char* path, int flags, int mode);
 static long sys_stat_path(const char* path, void* user_stat);
 static long sys_lstat_path(const char* path, void* user_stat);
@@ -39,6 +41,8 @@ static long sys_getcwd(char* buf, unsigned long size);
 static long sys_chdir(const char* path);
 static long sys_getpid();
 static long sys_getppid();
+static long sys_vfork();
+static long sys_wait4(int pid, int* status, int options, void* rusage);
 static long sys_getdents64(int fd, void* dirp, unsigned long count);
 static long sys_uname(void* uts);
 static long sys_gettimeofday(void* tv, void* tz);
@@ -61,7 +65,8 @@ static long sys_mkdir(const char* /*path*/, int /*mode*/);
 // --- TTY support (/dev/tty) ---
 extern "C" char g_tty_private_tag;
 static inline bool is_tty_file(fs_file_t* f){ return f && f->private_data == &g_tty_private_tag; }
-static inline bool is_tty_fd(int fd){ thread_t* t = thread_current(); return t && fd >= 0 && fd < THREAD_MAX_FD && is_tty_file(t->fds[fd]); }
+static inline thread_t* active_thread(){ thread_t* u = thread_get_current_user(); return u ? u : thread_current(); }
+static inline bool is_tty_fd(int fd){ thread_t* t = active_thread(); return t && fd >= 0 && fd < THREAD_MAX_FD && is_tty_file(t->fds[fd]); }
 static long sys_rmdir(const char* /*path*/);
 static long sys_rename(const char* /*oldp*/, const char* /*newp*/);
 static long sys_truncate(const char* /*path*/, long /*length*/);
@@ -80,12 +85,18 @@ static long sys_set_robust_list(void* /*head*/, size_t /*len*/);
 static long sys_prctl(long /*option*/, unsigned long /*arg2*/, unsigned long /*arg3*/, unsigned long /*arg4*/, unsigned long /*arg5*/);
 static long sys_faccessat(int dirfd, const char* path, int mode, int /*flags*/);
 
+
 // console I/O helpers and tty constants
 extern "C" char kgetc();
 extern "C" int kgetc_available();
 struct linux_winsize { unsigned short ws_row, ws_col, ws_xpixel, ws_ypixel; };
 static constexpr unsigned int LINUX_TCGETS = 0x5401;
 static constexpr unsigned int LINUX_TIOCGWINSZ = 0x5413;
+
+// --- Minimal process bookkeeping (used by sys_exit/wait4) ---
+static int g_parent_of[256] = {0}; // parent pid for simple wait4
+static int g_exit_code[256] = {0};
+static volatile int g_stopped[256] = {0};
 
 struct SyscallFrame {
     uint64_t user_r11;
@@ -122,6 +133,8 @@ extern "C" uint64_t syscall_entry_c(SyscallFrame* f){
     if (nr >= 512 && nr < 1024) nr -= 512;
     //PrintfQEMU("syscall num: %u\n", nr);
     switch (nr) {
+        case 58: /* vfork */ return (uint64_t)sys_vfork();
+        case 61: /* wait4  */ return (uint64_t)sys_wait4((int)f->a1, (int*)f->a2, (int)f->a3, (void*)f->a4);
         // Linux x86_64 ABI core
         case 0:  /* read   */ return (uint64_t)sys_read((int)f->a1, (void*)f->a2, f->a3);
         case 1:  /* write  */ return (uint64_t)sys_write((int)f->a1, (const char*)f->a2, f->a3);
@@ -130,7 +143,7 @@ extern "C" uint64_t syscall_entry_c(SyscallFrame* f){
         case 4:  /* stat   */ return (uint64_t)sys_stat_path((const char*)f->a1, (void*)f->a2);
         case 5:  /* fstat  */ return (uint64_t)sys_fstat_fd((int)f->a1, (void*)f->a2);
         case 6:  /* lstat  */ return (uint64_t)sys_lstat_path((const char*)f->a1, (void*)f->a2);
-        case 7:  /* poll (stub) */ return 0;
+        case 7:  /* poll */ return (uint64_t)sys_poll((void*)f->a1, f->a2, (int)f->a3);
         case 8:  /* lseek  */ return (uint64_t)sys_seek((int)f->a1, (int)f->a2, (int)f->a3);
         case 9:   /* mmap   */ return (uint64_t)sys_mmap_impl(f->a1, f->a2, f->a3, f->a4, f->a5, f->a6);
         case 10:  /* mprotect */ return (uint64_t)sys_mprotect_impl(f->a1, f->a2, f->a3);
@@ -247,24 +260,52 @@ static long sys_write(int fd, const char* buf, unsigned long len){
     PrintfQEMU("[write] fd=%d buf=0x%llx len=%llu\n", fd, (unsigned long long)(uint64_t)buf, (unsigned long long)len);
     if (fd == 1 || fd == 2 || is_tty_fd(fd)) {
         if (!buf || len == 0) return 0;
-        if (fd == 2) {
-            unsigned long n = len < 64 ? len : 64;
-            kprintf("<(0c)>");
-            PrintfQEMU("[write2] ");
-            for (unsigned long i = 0; i < n; ++i) {
-                char c = buf[i];
-                if (c == '\n' || (c >= 32 && c < 127)) {
-                    vbetty_put_char(c);
-                    // дублируем в лог читаемо
-                    PrintfQEMU("%c", c);
-                } else {
-                    vbetty_put_char('.');
-                    PrintfQEMU(".");
+        auto put_tty_char = [](char c){
+            if (c == '\r') { int y = vbetty_get_cursor_y(); vbetty_set_cursor_pos(0, y); return; }
+            if (c == '\b' || c == 127) { int x=vbetty_get_cursor_x(); int y=vbetty_get_cursor_y(); if (x>0) vbetty_set_cursor_pos(x-1,y); return; }
+            vbetty_put_char(c);
+        };
+        // Диагностика для fd==1: краткий предпросмотр и счётчик повторов
+        if (fd == 1) {
+            static const char hex[] = "0123456789ABCDEF";
+            static const void* last_buf = nullptr; static unsigned long last_len = 0; static unsigned long repeat = 0;
+            if (buf == last_buf && len == last_len) {
+                repeat++;
+                if ((repeat % 64) == 0) {
+                    extern uint64_t syscall_saved_user_rcx;
+                    uint64_t rip = syscall_saved_user_rcx;
+                    // снимем несколько байт кода по адресу RIP
+                    unsigned char op[8] = {0};
+                    for (int i=0;i<8;i++) op[i] = ((volatile unsigned char*)rip)[i];
+                    PrintfQEMU("[write1] repeat x%lu same buf=%p len=%lu caller=0x%llx op=%02x %02x %02x %02x %02x %02x %02x %02x\n",
+                        repeat, last_buf, last_len, (unsigned long long)rip,
+                        op[0],op[1],op[2],op[3],op[4],op[5],op[6],op[7]);
                 }
+            } else {
+                repeat = 0; last_buf = buf; last_len = len;
+                unsigned long n = len < 64 ? len : 64;
+                char out[3*64 + 1]; unsigned long j=0;
+                for (unsigned long i=0;i<n;i++){
+                    unsigned char c = (unsigned char)buf[i];
+                    if (c=='\n' || (c>=32 && c<127)) {
+                        // печатаем как текст
+                        PrintfQEMU("[write1] preview: ");
+                        for (unsigned long k=0;k<n;k++){
+                            unsigned char cc=(unsigned char)buf[k];
+                            PrintfQEMU("%c", (cc=='\n'||(cc>=32&&cc<127))?cc:'.');
+                        }
+                        PrintfQEMU("\n");
+                        break;
+                    } else {
+                        // если бинарщина — один раз покажем hex-дамп
+                        out[j++] = hex[(c>>4)&0xF]; out[j++] = hex[c&0xF]; out[j++] = ' ';
+                    }
+                }
+                if (j) { out[j?j-1:0] = '\0'; PrintfQEMU("[write1] hex: %s\n", out); }
             }
-            PrintfQEMU("\n");
         }
-        for (unsigned long i = 0; i < len; ++i) vbetty_put_char(buf[i]);
+        // stderr (fd==2) больше не дублируем в консоль и лог, просто печатаем ниже общей петлёй
+        for (unsigned long i = 0; i < len; ++i) put_tty_char(buf[i]);
         return (long)len;
     }
     return -1;
@@ -295,12 +336,27 @@ static void sys_exit(int code) {
     (void)code;
     thread_t* user = thread_get_current_user();
     if (user) {
+        PrintfQEMU("[exit] pid=%d name=%s code=%d\n", (int)user->tid, user->name, code);
+        g_exit_code[(int)user->tid] = code;
+        g_stopped[(int)user->tid] = 1;
         thread_stop((int)user->tid);
         thread_set_current_user(nullptr);
     } else {
-        thread_stop(thread_current()->tid);
+        thread_t* cur = thread_current();
+        if (cur) {
+            PrintfQEMU("[exit] kernel-thread pid=%d name=%s code=%d\n", (int)cur->tid, cur->name, code);
+            // Никогда не останавливаем idle (pid==0)
+            if (cur->tid != 0) {
+                thread_stop(cur->tid);
+            } else {
+                PrintfQEMU("[exit] ignore stop for idle thread\n");
+            }
+        } else {
+            PrintfQEMU("[exit] unknown-thread code=%d\n", code);
+        }
     }
-    thread_yield();
+    // Никогда не возвращаемся в ring3 после выхода процесса
+    for(;;) { thread_yield(); }
 }
 
 static int alloc_fd(thread_t* t, fs_file_t* f){
@@ -317,13 +373,13 @@ static long sys_open(const char* path, int flags){
         memset(f, 0, sizeof(*f));
         f->private_data = &g_tty_private_tag;
         f->mode = flags;
-        int fd = alloc_fd(thread_current(), f);
+        int fd = alloc_fd(active_thread(), f);
         if (fd < 0) { kfree(f); return -24; } // -EMFILE
         return fd;
     }
     fs_file_t* f = fs_open(path, flags);
     if(!f) return -1;
-    int fd = alloc_fd(thread_current(), f);
+    int fd = alloc_fd(active_thread(), f);
     if(fd<0){ fs_close(f); return -1; }
     return fd;
 }
@@ -333,21 +389,28 @@ static long sys_read(int fd, void* buf, unsigned long len){
     // stdin or /dev/tty from keyboard buffer
     if ((fd == 0 || is_tty_fd(fd)) && buf && len > 0) {
         unsigned long i = 0;
-        while (i < len) {
-            if (kgetc_available() == 0) { thread_schedule(); continue; }
+        for (;;) {
+            if (kgetc_available() == 0) {
+                if (i > 0) return (long)i; // частичное чтение
+                // Разрешим прерывания и подождём IRQ, чтобы клавиатура/PIT могли сработать
+                asm volatile("sti; hlt");
+                continue;
+            }
             char c = kgetc();
             reinterpret_cast<char*>(buf)[i++] = c;
-            if (c == '\n') break;
+            // Возврат по достижению лимита или по переводу строки
+            kprintf("%c", c);
+            if (i >= len || c == '\n') return (long)i;
+            if (kgetc_available() == 0) return (long)i; // отдаём то, что есть
         }
-        return (long)i;
     }
-    thread_t* t = thread_current();
+    thread_t* t = active_thread();
     if(fd<0 || fd>=THREAD_MAX_FD || !t->fds[fd] || !buf) return -1;
     return fs_read(t->fds[fd], buf, len);
 }
 
 static long sys_close(int fd){
-    thread_t* t = thread_current();
+    thread_t* t = active_thread();
     if(fd<0 || fd>=THREAD_MAX_FD || !t->fds[fd]) return -1;
     fs_file_t* f = t->fds[fd];
     if (is_tty_file(f)) { kfree(f); t->fds[fd]=nullptr; return 0; }
@@ -357,7 +420,7 @@ static long sys_close(int fd){
 }
 
 static long sys_seek(int fd, int off, int whence){
-    thread_t* t = thread_current();
+    thread_t* t = active_thread();
     if(fd<0 || fd>=THREAD_MAX_FD || !t->fds[fd]) return -1;
     if (is_tty_file(t->fds[fd])) return -29; // -ESPIPE
     return fs_seek(t->fds[fd], off, whence);
@@ -365,6 +428,44 @@ static long sys_seek(int fd, int off, int whence){
 
 static void sys_sleep(unsigned long ms){
     thread_sleep((uint32_t)ms);
+}
+
+// Минимальная реализация poll(2): поддержка POLLIN/POLLOUT, /dev/tty
+static long sys_poll(void* fds_user, unsigned long nfds, int timeout_ms){
+    if (!fds_user || nfds == 0) return 0;
+    struct pollfd_linux { int fd; short events; short revents; };
+    const short POLLIN = 0x0001; const short POLLOUT = 0x0004; const short POLLERR = 0x0008;
+    pollfd_linux* fds = (pollfd_linux*)fds_user;
+    auto compute_ready = [&]()->unsigned long{
+        unsigned long ready = 0;
+        thread_t* t = active_thread();
+        for (unsigned long i=0;i<nfds;i++){
+            int fd = fds[i].fd; short ev = fds[i].events; fds[i].revents = 0;
+            if (fd < 0 || fd >= THREAD_MAX_FD || !t->fds[fd]) { fds[i].revents |= POLLERR; continue; }
+            if (is_tty_file(t->fds[fd])){
+                if ((ev & POLLIN) && kgetc_available()) fds[i].revents |= POLLIN;
+                if (ev & POLLOUT) fds[i].revents |= POLLOUT;
+            } else {
+                if (ev & POLLIN) fds[i].revents |= POLLIN;
+                if (ev & POLLOUT) fds[i].revents |= POLLOUT;
+            }
+            if (fds[i].revents) ready++;
+        }
+        return ready;
+    };
+    unsigned long r = compute_ready();
+    if (r > 0) return (long)r;
+    if (timeout_ms == 0) return 0;
+    uint64_t start = pit_ticks;
+    for(;;){
+        r = compute_ready();
+        if (r > 0) return (long)r;
+        if (timeout_ms > 0) {
+            uint64_t elapsed = pit_ticks - start;
+            if (elapsed >= (uint64_t)timeout_ms) return 0;
+        }
+        thread_sleep(1);
+    }
 }
 
 // Minimal openat implementation: support AT_FDCWD (-100) or absolute path
@@ -379,13 +480,13 @@ static long sys_openat(int dirfd, const char* path, int flags, int /*mode*/){
         memset(f, 0, sizeof(*f));
         f->private_data = &g_tty_private_tag;
         f->mode = flags;
-        int fd = alloc_fd(thread_current(), f);
+        int fd = alloc_fd(active_thread(), f);
         if (fd < 0) { kfree(f); return -24; } // -EMFILE
         return fd;
     }
     fs_file_t* f = fs_open(path, flags);
     if (!f) return -2; // -ENOENT
-    int fd = alloc_fd(thread_current(), f);
+    int fd = alloc_fd(active_thread(), f);
     if (fd < 0) { fs_close(f); return -24; } // -EMFILE
     return fd;
 }
@@ -417,7 +518,8 @@ static uint32_t fs_attrs_to_mode(uint32_t attrs){
     const uint32_t S_IFDIR = 0040000;
     const uint32_t S_IFREG = 0100000;
     const uint32_t PERM_DIR = 0755;
-    const uint32_t PERM_REG = 0644;
+    // Разрешим исполняемость обычных файлов по умолчанию (для applets busybox и т.п.)
+    const uint32_t PERM_REG = 0755;
     if (attrs & FS_ATTR_DIRECTORY) return S_IFDIR | PERM_DIR;
     return S_IFREG | PERM_REG;
 }
@@ -458,7 +560,7 @@ static long sys_lstat_path(const char* path, void* user_stat){
 }
 
 static long sys_fstat_fd(int fd, void* user_stat){
-    thread_t* t = thread_current();
+    thread_t* t = active_thread();
     if (!t || fd < 0 || fd >= THREAD_MAX_FD || !t->fds[fd] || !user_stat) return -9;
     fs_file_t* f = t->fds[fd];
     struct linux_stat* ls = (struct linux_stat*)user_stat;
@@ -504,6 +606,33 @@ static long sys_getpid(){
 
 static long sys_getppid(){
     return 1;
+}
+
+// --- Minimal process table on top of thread_t ---
+
+static long sys_vfork(){
+    thread_t* parent = thread_get_current_user();
+    if (!parent) return -38; // -ENOSYS if no user thread
+    // Child shares address space and FDs; we reuse current thread as child context via exec trampoline
+    // Save parent pid and mark for wait
+    int ppid = (int)parent->tid;
+    // Child will run at same RIP/RSP after return to userspace; set tramp to just deliver RAX=0
+    exec_new_rip = parent->user_rip; exec_new_rsp = parent->user_stack; exec_child_rax = 0; exec_trampoline = 1;
+    // Return child's pid to parent in RAX after iret (handled on next syscall return path)
+    // For simplicity, use same pid; real fork would allocate new. Minimal hush uses vfork+execve immediately.
+    return (long)ppid; // parent sees pid, child sees 0 via exec_child_rax
+}
+
+static long sys_wait4(int pid, int* status, int /*options*/, void* /*rusage*/){
+    thread_t* me = thread_get_current_user(); (void)me;
+    // Minimal stub: just return immediately with pid if thread terminated flag is set via sys_exit
+    if (pid <= 0) pid = 2; // default user pid
+    // Busy loop with sleep until thread_get_state says TERMINATED
+    for(;;){
+        int st = thread_get_state(pid);
+        if (st == THREAD_TERMINATED){ if (status) *status = g_exit_code[pid]; return pid; }
+        thread_sleep(1);
+    }
 }
 
 // linux_dirent64 structure for getdents64
@@ -768,25 +897,38 @@ extern "C" uint64_t sys_execve(const char* path, const char* const* argv, const 
     if (!kpath) return (uint64_t)-12; // -ENOMEM
     memcpy(kpath, path, path_len + 1);
 
-    // Copy argv pointers and strings to kernel temp buffers
+    // Copy argv/envp pointers and strings to kernel temp buffers
     const int MAX_ARGS = 64;
-    const int MAX_ENVS = 0; // skip env for now
-    const char* kargv_strs[MAX_ARGS];
-    size_t kargv_lens[MAX_ARGS];
-    int argc = 0;
+    const int MAX_ENVS = 64;
+    const char* kargv_strs[MAX_ARGS]; size_t kargv_lens[MAX_ARGS]; int argc = 0;
+    const char* kenv_strs[MAX_ENVS];  size_t kenv_lens[MAX_ENVS];  int envc = 0;
     if (argv){
         while (argc < MAX_ARGS && argv[argc]){
-            const char* a = argv[argc];
-            size_t alen = strlen(a);
-            char* astr = (char*)kmalloc(alen + 1);
-            if (!astr) { argc = 0; break; }
+            const char* a = argv[argc]; size_t alen = strlen(a);
+            char* astr = (char*)kmalloc(alen + 1); if (!astr) { argc = 0; break; }
             memcpy(astr, a, alen + 1);
-            kargv_strs[argc] = astr;
-            kargv_lens[argc] = alen + 1;
-            argc++;
+            kargv_strs[argc] = astr; kargv_lens[argc] = alen + 1; argc++;
         }
     }
-    int envc = 0; (void)envp; // not used yet
+    if (envp){
+        while (envc < MAX_ENVS && envp[envc]){
+            const char* e = envp[envc]; size_t elen = strlen(e);
+            char* estr = (char*)kmalloc(elen + 1); if (!estr) { envc = 0; break; }
+            memcpy(estr, e, elen + 1);
+            kenv_strs[envc] = estr; kenv_lens[envc] = elen + 1; envc++;
+        }
+    }
+    if (envc == 0){
+        // Default environment for interactive shells
+        const char* def0 = "PATH=/bin:/usr/bin";
+        const char* def1 = "HOME=/root";
+        const char* def2 = "TERM=linux";
+        const char* def3 = "PS1=$ ";
+        kenv_strs[envc] = def0; kenv_lens[envc++] = strlen(def0) + 1;
+        kenv_strs[envc] = def1; kenv_lens[envc++] = strlen(def1) + 1;
+        kenv_strs[envc] = def2; kenv_lens[envc++] = strlen(def2) + 1;
+        kenv_strs[envc] = def3; kenv_lens[envc++] = strlen(def3) + 1;
+    }
 
     // Load ELF: map segments and user stack
     uint64_t entry = 0, ustack_top = 0;
@@ -799,14 +941,11 @@ extern "C" uint64_t sys_execve(const char* path, const char* const* argv, const 
     // Build user stack: [argc][argv*][NULL][envp*][NULL][auxv][...strings...]
     uint64_t sp = ustack_top;
 
-    // Copy strings to top descending
+    // Copy strings to top descending: argv then envp
     uint64_t arg_addrs[MAX_ARGS];
-    for (int i = argc - 1; i >= 0; --i){
-        size_t len = kargv_lens[i];
-        sp -= len;
-        memcpy((void*)sp, kargv_strs[i], len);
-        arg_addrs[i] = sp;
-    }
+    for (int i = argc - 1; i >= 0; --i){ size_t len = kargv_lens[i]; sp -= len; memcpy((void*)sp, kargv_strs[i], len); arg_addrs[i] = sp; }
+    uint64_t env_addrs[MAX_ENVS];
+    for (int i = envc - 1; i >= 0; --i){ size_t len = kenv_lens[i]; sp -= len; memcpy((void*)sp, kenv_strs[i], len); env_addrs[i] = sp; }
 
     // Align to 16
     sp &= ~0xFULL;
@@ -820,7 +959,7 @@ extern "C" uint64_t sys_execve(const char* path, const char* const* argv, const 
     vec[idx++] = (uint64_t)argc;
     for (int i = 0; i < argc; ++i) vec[idx++] = arg_addrs[i];
     vec[idx++] = 0; // argv NULL
-    // no env
+    for (int i = 0; i < envc; ++i) vec[idx++] = env_addrs[i];
     vec[idx++] = 0; // envp NULL
     // auxv
     const uint64_t AT_NULL=0, AT_PAGESZ=6, AT_CLKTCK=17;
@@ -921,7 +1060,7 @@ static long sys_truncate(const char* /*path*/, long /*length*/){ return 0; }
 static long sys_ftruncate(int /*fd*/, unsigned long /*length*/){ return 0; }
 static long sys_ioctl(int fd, unsigned int cmd, unsigned long arg){
     PrintfQEMU("[ioctl] fd=%d cmd=0x%x arg=0x%llx\n", fd, cmd, (unsigned long long)arg);
-    thread_t* t = thread_current();
+    thread_t* t = active_thread();
     if (fd < 0 || fd >= THREAD_MAX_FD || !t->fds[fd]) return -9; // -EBADF
     if (is_tty_file(t->fds[fd])){
         if (cmd == LINUX_TCGETS) {

@@ -5,6 +5,7 @@
 .extern exec_new_rip
 .extern exec_new_rsp
 .extern exec_trampoline
+.extern exec_child_rax
 .extern syscall_saved_user_rsp
 .extern syscall_saved_user_rcx
 
@@ -45,8 +46,9 @@ syscall_entry:
     mov rdi, r13
     call syscall_entry_c
     add rsp, 8
-
-    // Check for exec trampoline flag
+    // Preserve syscall return value across trampoline check
+    mov r12, rax
+    // Check for exec/vfork trampoline flag
     mov rax, qword ptr [rip + exec_trampoline]
     test rax, rax
     je 1f
@@ -70,11 +72,17 @@ syscall_entry:
     push 0x1b                       // CS
     mov rsi, qword ptr [rip + exec_new_rip]
     push rsi                        // RIP
+    // Set RAX for child/parent as requested by kernel
+    mov rax, qword ptr [rip + exec_child_rax]
+    // clear child rax after use
+    mov qword ptr [rip + exec_child_rax], 0
     // clear trampoline flag
     mov qword ptr [rip + exec_trampoline], 0
     iretq
 1:
     // Restore user state and return via IRET
+    // Restore return value to RAX
+    mov rax, r12
     // Compute RFLAGS into r11 (ensure bit1=1, NT=0)
     mov r11, qword ptr [r13 + 0]
     or r11, 0x2

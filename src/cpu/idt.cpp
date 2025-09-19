@@ -62,8 +62,14 @@ static void gp_fault_handler(cpu_registers_t* regs){
             if (va >= 0x40000000ULL && va < 0x80000000ULL) return true;
             return false;
         };
-        // HLT
-        if (b0 == 0xF4) { PrintfQEMU("[gp] skip HLT at user RIP=0x%lx\n", regs->rip); regs->rip += 1; return; }
+        // HLT: эмулируем ожидание прерывания и пропускаем инструкцию
+        if (b0 == 0xF4) {
+            PrintfQEMU("[gp] emulate HLT at user RIP=0x%lx\n", regs->rip);
+            // Разрешим прерывания и усыпим ядро до ближайшего IRQ (например, PIT)
+            asm volatile("sti; hlt");
+            regs->rip += 1;
+            return;
+        }
         // UD2 (0F 0B)
         if (b0 == 0x0F && b1 == 0x0B) { PrintfQEMU("[gp] skip UD2 at user RIP=0x%lx\n", regs->rip); regs->rip += 2; return; }
         // INT3 (CC)

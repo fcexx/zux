@@ -152,6 +152,101 @@ void list_directory_contents(const char* path) {
 
 // user_demo 㤠��: ����� ����㦠�� ELF �� 䠩����� ��⥬�
 
+static int kexecve(const char* path, const char* const* argv){
+    if (!path) return -22;
+    uint64_t entry = 0, ustack_top = 0;
+    if (elf64_load_process(path, 1 << 20, &entry, &ustack_top) != 0) {
+        return -2;
+    }
+    const int MAX_ARGS = 64;
+    const char* kargv_strs[MAX_ARGS];
+    size_t kargv_lens[MAX_ARGS];
+    int argc = 0;
+    if (argv){
+        while (argc < MAX_ARGS && argv[argc]){
+            const char* a = argv[argc];
+            size_t alen = strlen(a) + 1;
+            kargv_strs[argc] = a;
+            kargv_lens[argc] = alen;
+            argc++;
+        }
+    }
+    const char env0[] = "PATH=/bin:/usr/bin";
+    const char env1[] = "HOME=/root";
+    const char env2[] = "TERM=linux";
+    const char env3[] = "PS1=~ # ";
+    uint8_t rnd[16];
+    uint64_t t = pit_ticks ? pit_ticks : 0x12345678ULL;
+    for (int i=0;i<16;i++){ rnd[i]=(uint8_t)((t>>((i*5)%32))^((uint64_t)(0x9e + 3*i))); }
+    extern uint64_t elf_last_at_phdr, elf_last_at_phent, elf_last_at_phnum, elf_last_at_entry;
+    uint64_t at_phdr = elf_last_at_phdr;
+    uint64_t at_phent = elf_last_at_phent;
+    uint64_t at_phnum = elf_last_at_phnum;
+    uint64_t at_entry = elf_last_at_entry ? elf_last_at_entry : entry;
+
+    uint64_t sp = ustack_top;
+    sp -= sizeof(env3); memcpy((void*)sp, env3, sizeof(env3)); uint64_t e3 = sp;
+    sp -= sizeof(env2); memcpy((void*)sp, env2, sizeof(env2)); uint64_t e2 = sp;
+    sp -= sizeof(env1); memcpy((void*)sp, env1, sizeof(env1)); uint64_t e1 = sp;
+    sp -= sizeof(env0); memcpy((void*)sp, env0, sizeof(env0)); uint64_t e0 = sp;
+
+    uint64_t arg_addrs[MAX_ARGS];
+    for (int i = argc - 1; i >= 0; --i){
+        size_t len = kargv_lens[i];
+        sp -= len; memcpy((void*)sp, kargv_strs[i], len); arg_addrs[i] = sp;
+    }
+
+    sp -= sizeof(rnd); memcpy((void*)sp, rnd, sizeof(rnd)); uint64_t at_random_ptr = sp;
+    sp &= ~0xFULL;
+
+    const uint64_t AT_NULL=0, AT_PAGESZ=6, AT_PHDR=3, AT_PHENT=4, AT_PHNUM=5, AT_ENTRY=9, AT_RANDOM=25;
+    size_t vec_qwords = 1 + (size_t)argc + 1 + 4 + 1 + 2*7;
+    sp -= vec_qwords * 8ULL;
+    uint64_t* vec = (uint64_t*)sp;
+    size_t idx = 0;
+    vec[idx++] = (uint64_t)argc;
+    for (int i = 0; i < argc; ++i) vec[idx++] = arg_addrs[i];
+    vec[idx++] = 0;
+    vec[idx++] = e0; vec[idx++] = e1; vec[idx++] = e2; vec[idx++] = e3; vec[idx++] = 0;
+    vec[idx++] = AT_PHDR;   vec[idx++] = at_phdr;
+    vec[idx++] = AT_PHENT;  vec[idx++] = at_phent;
+    vec[idx++] = AT_PHNUM;  vec[idx++] = at_phnum;
+    vec[idx++] = AT_ENTRY;  vec[idx++] = at_entry;
+    vec[idx++] = AT_PAGESZ; vec[idx++] = 4096;
+    vec[idx++] = AT_RANDOM; vec[idx++] = at_random_ptr;
+    vec[idx++] = AT_NULL;   vec[idx++] = 0;
+
+    uint64_t tls_va = (ustack_top & ~0xFFFFFULL) - 0x1000ULL;
+    void* tls_page = kmalloc(0x2000);
+    if (tls_page) {
+        uint64_t tls_phys = ((uint64_t)tls_page + 0xFFFULL) & ~0xFFFULL;
+        paging_map_page(tls_va, tls_phys, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+        memset((void*)tls_va, 0, 0x1000);
+    }
+
+    const char* base = path; for (const char* p = path; *p; ++p) if (*p=='/') base = p+1;
+    thread_register_user(entry, sp, base && *base ? base : "user");
+    {
+        thread_t* ut = thread_get_current_user();
+        if (ut) {
+            extern char g_tty_private_tag;
+            for (int i = 0; i < 3; ++i) ut->fds[i] = nullptr;
+            fs_file_t* f0 = (fs_file_t*)kmalloc(sizeof(fs_file_t)); if (f0){ memset(f0,0,sizeof(*f0)); f0->private_data=&g_tty_private_tag; }
+            fs_file_t* f1 = (fs_file_t*)kmalloc(sizeof(fs_file_t)); if (f1){ memset(f1,0,sizeof(*f1)); f1->private_data=&g_tty_private_tag; }
+            fs_file_t* f2 = (fs_file_t*)kmalloc(sizeof(fs_file_t)); if (f2){ memset(f2,0,sizeof(*f2)); f2->private_data=&g_tty_private_tag; }
+            ut->fds[0]=f0; ut->fds[1]=f1; ut->fds[2]=f2;
+        }
+    }
+    PrintfQEMU("[kexecve] path=%s rip=0x%llx rsp=0x%llx\n", path, (unsigned long long)entry, (unsigned long long)sp);
+    asm volatile(
+        "xor %%rbx, %%rbx; xor %%rdi, %%rdi; xor %%rsi, %%rsi; xor %%rdx, %%rdx;\n"
+        "xor %%r12, %%r12; xor %%r13, %%r13; xor %%r14, %%r14; xor %%r15, %%r15;\n"
+        :::"rbx","rdi","rsi","rdx","r12","r13","r14","r15");
+    asm volatile("sti");
+    enter_user_mode(entry, sp);
+    return 0;
+}
+
 extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_ptr) {
     enable_sse();
     parse_multiboot2(multiboot2_info_ptr);
@@ -274,159 +369,11 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
         }
     }
 
-    // Попытка выполнить /start как init: читаем /start, передаём в busybox sh -c
+    // Если сюда дошли — запускаем сразу шелл (busybox applet) с argv0="sh"
+    PrintfQEMU("Loading /bin/busybox fallback...\n");
     {
-        uint64_t elf_entry = 0, ustack_top = 0;
-        if (elf64_load_process("/bin/busybox", 1 << 20, &elf_entry, &ustack_top) == 0) {
-            // Прочитаем /start из VFS
-            char* script_buf = nullptr;
-            uint64_t script_len = 0;
-            {
-                fs_file_t* sf = fs_open("/start", FS_OPEN_READ);
-                if (sf) {
-                    script_len = sf->size;
-                    if (script_len > 4096) script_len = 4096; // ограничим для простоты
-                    script_buf = (char*)kmalloc(script_len + 1);
-                    if (script_buf) {
-                        int rd = fs_read(sf, script_buf, (int)script_len);
-                        if (rd < 0) rd = 0;
-                        script_buf[rd] = '\0';
-                        script_len = (uint64_t)rd;
-                    }
-                    fs_close(sf);
-                }
-            }
-            // Сформировать стек для argv=["sh","-c",script], envп, auxv
-            uint64_t sp = ustack_top;
-            const char arg0[] = "sh";
-            const char arg1[] = "-c";
-            const char* arg2 = script_buf ? script_buf : ". /start; exec sh -i";
-            // env
-            const char env0[] = "PATH=/bin:/usr/bin";
-            const char env1[] = "HOME=/root";
-            const char env2[] = "TERM=linux";
-            const char env3[] = "PS1=~ # ";
-
-            // Копируем строки (env, затем argv) на вершину стека (вниз)
-            sp -= sizeof(env3); memcpy((void*)sp, env3, sizeof(env3)); uint64_t e3 = sp;
-            sp -= sizeof(env2); memcpy((void*)sp, env2, sizeof(env2)); uint64_t e2 = sp;
-            sp -= sizeof(env1); memcpy((void*)sp, env1, sizeof(env1)); uint64_t e1 = sp;
-            sp -= sizeof(env0); memcpy((void*)sp, env0, sizeof(env0)); uint64_t e0 = sp;
-            size_t arg2_len = strlen(arg2) + 1;
-            sp -= arg2_len; memcpy((void*)sp, arg2, arg2_len); uint64_t a2 = sp;
-            sp -= sizeof(arg1); memcpy((void*)sp, arg1, sizeof(arg1)); uint64_t a1 = sp;
-            sp -= sizeof(arg0); memcpy((void*)sp, arg0, sizeof(arg0)); uint64_t a0 = sp;
-            // AT_RANDOM
-            uint8_t rnd[16];
-            uint64_t t = pit_ticks ? pit_ticks : 0x12345678ULL;
-            for (int i=0;i<16;i++){ rnd[i]=(uint8_t)((t>>((i*5)%32))^((uint64_t)(0x9e + 3*i))); }
-            sp -= sizeof(rnd); memcpy((void*)sp, rnd, sizeof(rnd)); uint64_t at_random_ptr = sp;
-            sp &= ~0xFULL;
-            const uint64_t AT_NULL=0, AT_PAGESZ=6, AT_PHDR=3, AT_PHENT=4, AT_PHNUM=5, AT_ENTRY=9, AT_RANDOM=25;
-            extern uint64_t elf_last_at_phdr, elf_last_at_phent, elf_last_at_phnum, elf_last_at_entry;
-            uint64_t at_phdr = elf_last_at_phdr;
-            uint64_t at_phent = elf_last_at_phent;
-            uint64_t at_phnum = elf_last_at_phnum;
-            uint64_t at_entry = elf_last_at_entry;
-            // Вектор: argc, argv*, NULL, envп, NULL, auxv
-            uint64_t vec[] = {
-                3, a0, a1, a2, 0,
-                e0, e1, e2, e3, 0,
-                AT_PHDR, at_phdr,
-                AT_PHENT, at_phent,
-                AT_PHNUM, at_phnum,
-                AT_ENTRY, at_entry,
-                AT_PAGESZ, 4096,
-                AT_RANDOM, at_random_ptr,
-                AT_NULL, 0
-            };
-            sp -= sizeof(vec); memcpy((void*)sp, vec, sizeof(vec));
-            // TLS страница (как раньше)
-            uint64_t tls_va = (ustack_top & ~0xFFFFFULL) - 0x1000ULL;
-            void* tls_page = kmalloc(0x2000);
-            if (tls_page) {
-                uint64_t tls_phys = ((uint64_t)tls_page + 0xFFFULL) & ~0xFFFULL;
-                paging_map_page(tls_va, tls_phys, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
-                memset((void*)tls_va, 0, 0x1000);
-            }
-            thread_register_user(elf_entry, sp, "init");
-            // init stdio as /dev/tty
-            {
-                thread_t* ut = thread_get_current_user();
-                if (ut) {
-                    extern char g_tty_private_tag;
-                    for (int i = 0; i < 3; ++i) ut->fds[i] = nullptr;
-                    fs_file_t* f0 = (fs_file_t*)kmalloc(sizeof(fs_file_t)); if (f0){ memset(f0,0,sizeof(*f0)); f0->private_data=&g_tty_private_tag; }
-                    fs_file_t* f1 = (fs_file_t*)kmalloc(sizeof(fs_file_t)); if (f1){ memset(f1,0,sizeof(*f1)); f1->private_data=&g_tty_private_tag; }
-                    fs_file_t* f2 = (fs_file_t*)kmalloc(sizeof(fs_file_t)); if (f2){ memset(f2,0,sizeof(*f2)); f2->private_data=&g_tty_private_tag; }
-                    ut->fds[0]=f0; ut->fds[1]=f1; ut->fds[2]=f2;
-                }
-            }
-            PrintfQEMU("[enter_user] rip=0x%llx rsp=0x%llx cs=0x%x ss=0x%x\n",
-                       (unsigned long long)elf_entry,
-                       (unsigned long long)sp,
-                       (unsigned)USER_CS,
-                       (unsigned)USER_DS);
-            asm volatile(
-                "xor %%rbx, %%rbx; xor %%rdi, %%rdi; xor %%rsi, %%rsi; xor %%rdx, %%rdx;\n"
-                "xor %%r12, %%r12; xor %%r13, %%r13; xor %%r14, %%r14; xor %%r15, %%r15;\n"
-                :::"rbx","rdi","rsi","rdx","r12","r13","r14","r15");
-            asm volatile("sti");
-            enter_user_mode(elf_entry, sp);
-        }
-    }
-
-    // Если сюда дошли — fallback на старый путь /bin/sh
-    uint64_t elf_entry = 0, ustack_top = 0;
-    PrintfQEMU("Loading /bin/sh...\n");
-    if (elf64_load_process("/bin/sh", 1 << 20, &elf_entry, &ustack_top) == 0) {
-        // Сформировать стек для argv=["sh","/start"], envp=NULL, auxv
-        uint64_t sp = ustack_top;
-        const char arg0[] = "sh";
-        const char arg1[] = "/start";
-        sp -= sizeof(arg1); memcpy((void*)sp, arg1, sizeof(arg1)); uint64_t a1 = sp;
-        sp -= sizeof(arg0); memcpy((void*)sp, arg0, sizeof(arg0)); uint64_t a0 = sp;
-        // AT_RANDOM
-        uint8_t rnd[16];
-        uint64_t t = pit_ticks ? pit_ticks : 0x12345678ULL;
-        for (int i=0;i<16;i++){ rnd[i]=(uint8_t)((t>>((i*5)%32))^((uint64_t)(0x9e + 3*i))); }
-        sp -= sizeof(rnd); memcpy((void*)sp, rnd, sizeof(rnd)); uint64_t at_random_ptr = sp;
-        sp &= ~0xFULL;
-        const uint64_t AT_NULL=0, AT_PAGESZ=6, AT_PHDR=3, AT_PHENT=4, AT_PHNUM=5, AT_ENTRY=9, AT_RANDOM=25;
-        uint64_t at_phdr = (0x20000000ULL) + 64; // предположительно, как и выше
-        uint64_t at_phent = 56; uint64_t at_phnum = 7; uint64_t at_entry = elf_entry;
-        uint64_t vec[] = {
-            2, a0, a1, 0, // argc=2, argv[0], argv[1], NULL
-            0,            // envp NULL
-            AT_PHDR, at_phdr,
-            AT_PHENT, at_phent,
-            AT_PHNUM, at_phnum,
-            AT_ENTRY, at_entry,
-            AT_PAGESZ, 4096,
-            AT_RANDOM, at_random_ptr,
-            AT_NULL, 0
-        };
-        sp -= sizeof(vec); memcpy((void*)sp, vec, sizeof(vec));
-        // TLS страница (как раньше)
-        uint64_t tls_va = (ustack_top & ~0xFFFFFULL) - 0x1000ULL;
-        void* tls_page = kmalloc(0x2000);
-        if (tls_page) {
-            uint64_t tls_phys = ((uint64_t)tls_page + 0xFFFULL) & ~0xFFFULL;
-            paging_map_page(tls_va, tls_phys, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
-            memset((void*)tls_va, 0, 0x1000);
-        }
-        thread_register_user(elf_entry, sp, "init");
-        PrintfQEMU("[enter_user] rip=0x%llx rsp=0x%llx cs=0x%x ss=0x%x\n",
-                   (unsigned long long)elf_entry,
-                   (unsigned long long)sp,
-                   (unsigned)USER_CS,
-                   (unsigned)USER_DS);
-        asm volatile(
-            "xor %%rbx, %%rbx; xor %%rdi, %%rdi; xor %%rsi, %%rsi; xor %%rdx, %%rdx;\n"
-            "xor %%r12, %%r12; xor %%r13, %%r13; xor %%r14, %%r14; xor %%r15, %%r15;\n"
-            :::"rbx","rdi","rsi","rdx","r12","r13","r14","r15");
-        asm volatile("sti");
-        enter_user_mode(elf_entry, sp);
+        const char* argv_fallback[] = { "sh", nullptr };
+        (void)kexecve("/bin/busybox", argv_fallback);
     }
 
     
