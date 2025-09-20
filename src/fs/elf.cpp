@@ -8,6 +8,80 @@
 // minimal uintptr_t for freestanding
 typedef unsigned long long uintptr_t;
 
+// --- Local ELF constants (freestanding, no libc elf.h) ---
+#ifndef EI_MAG0
+#define EI_MAG0   0
+#endif
+#ifndef EI_MAG1
+#define EI_MAG1   1
+#endif
+#ifndef EI_MAG2
+#define EI_MAG2   2
+#endif
+#ifndef EI_MAG3
+#define EI_MAG3   3
+#endif
+#ifndef ELFMAG0
+#define ELFMAG0   0x7f
+#endif
+#ifndef ELFMAG1
+#define ELFMAG1   'E'
+#endif
+#ifndef ELFMAG2
+#define ELFMAG2   'L'
+#endif
+#ifndef ELFMAG3
+#define ELFMAG3   'F'
+#endif
+#ifndef EI_CLASS
+#define EI_CLASS  4
+#endif
+#ifndef EI_DATA
+#define EI_DATA   5
+#endif
+#ifndef ELFCLASS64
+#define ELFCLASS64 2
+#endif
+#ifndef ELFDATA2LSB
+#define ELFDATA2LSB 1
+#endif
+#ifndef PT_LOAD
+#define PT_LOAD   1
+#endif
+#ifndef PT_DYNAMIC
+#define PT_DYNAMIC 2
+#endif
+#ifndef DT_NULL
+#define DT_NULL   0
+#endif
+#ifndef DT_RELA
+#define DT_RELA   7
+#endif
+#ifndef DT_RELASZ
+#define DT_RELASZ 8
+#endif
+#ifndef DT_RELAENT
+#define DT_RELAENT 9
+#endif
+#ifndef DT_REL
+#define DT_REL    17
+#endif
+#ifndef DT_RELSZ
+#define DT_RELSZ  18
+#endif
+#ifndef DT_RELENT
+#define DT_RELENT 19
+#endif
+#ifndef DT_RELRSZ
+#define DT_RELRSZ 35
+#endif
+#ifndef DT_RELR
+#define DT_RELR   36
+#endif
+#ifndef DT_RELRENT
+#define DT_RELRENT 37
+#endif
+
 // Экспорт auxv параметров последней загруженной программы
 extern "C" uint64_t elf_last_at_phdr  = 0;
 extern "C" uint64_t elf_last_at_phent = 0;
@@ -18,8 +92,8 @@ extern "C" uint64_t elf_last_brk_base = 0;
 // База загрузки последней программы (для эвристик ребейза адресов в #GP)
 extern "C" uint64_t elf_last_load_base = 0;
 
-// Простой статический пул страниц (2 МБ) для маппинга ELF и пользовательского стека
-static uint8_t elf_page_pool[2 * 1024 * 1024] __attribute__((aligned(4096)));
+// Простой статический пул страниц (16 МБ) для маппинга ELF и пользовательского стека
+static uint8_t elf_page_pool[16 * 1024 * 1024] __attribute__((aligned(4096)));
 static uint32_t elf_page_pool_used_pages = 0; // по 4К
 static inline void* elf_alloc_page4k() {
     const uint32_t max_pages = (uint32_t)(sizeof(elf_page_pool) / 4096);
@@ -60,37 +134,27 @@ struct __attribute__((packed)) Elf64_Phdr {
 
 struct __attribute__((packed)) Elf64_Dyn {
     int64_t  d_tag;
-    union { uint64_t d_val; uint64_t d_ptr; } d_un;
+    union {
+        uint64_t d_val;
+        uint64_t d_ptr;
+    } d_un;
 };
 
+typedef uint64_t Elf64_Addr;
 struct __attribute__((packed)) Elf64_Rela {
-    uint64_t r_offset;
-    uint64_t r_info;
-    int64_t  r_addend;
+    Elf64_Addr r_offset;
+    uint64_t   r_info;
+    int64_t    r_addend;
 };
 
-static const uint32_t PT_LOAD = 1;
-static const uint32_t PT_DYNAMIC = 2;
-static const int64_t DT_NULL    = 0;
-static const int64_t DT_RELA    = 7;
-static const int64_t DT_RELASZ  = 8;
-static const int64_t DT_RELAENT = 9;
-static const int64_t DT_REL     = 17;
-static const int64_t DT_RELSZ   = 18;
-static const int64_t DT_RELENT  = 19;
-static const int64_t DT_RELR    = 0x23; // 35
-static const int64_t DT_RELRSZ  = 0x24; // 36
-static const int64_t DT_RELRENT = 0x25; // 37
-static const uint32_t R_X86_64_RELATIVE = 8;
-static const uint32_t R_X86_64_64       = 1;
-static const uint32_t R_X86_64_GLOB_DAT = 6;
-static inline uint32_t ELF64_R_TYPE(uint64_t r_info){ return (uint32_t)(r_info & 0xFFFFFFFFu); }
-static inline uint32_t ELF64_R_SYM(uint64_t r_info){ return (uint32_t)(r_info >> 32); }
-static const unsigned EI_MAG0=0, EI_MAG1=1, EI_MAG2=2, EI_MAG3=3, EI_CLASS=4, EI_DATA=5;
-static const unsigned char ELFMAG0=0x7f, ELFMAG1='E', ELFMAG2='L', ELFMAG3='F';
-static const unsigned char ELFCLASS64=2; // 64-bit
-static const unsigned char ELFDATA2LSB=1; // little-endian
-struct __attribute__((packed)) Elf64_Rel {
+#define ELF64_R_SYM(i)   ((i) >> 32)
+#define ELF64_R_TYPE(i)  ((i) & 0xffffffff)
+#define R_X86_64_RELATIVE 8
+#define R_X86_64_64       1
+#define R_X86_64_GLOB_DAT 6
+
+struct __attribute__((packed)) Elf64_Rel
+{
     uint64_t r_offset;
     uint64_t r_info;
 };
@@ -138,10 +202,13 @@ int elf64_load_process(const char* path, uint64_t user_stack_size,
 
     // Map PT_LOAD segments
     uint64_t max_load_end = 0;
+    uint64_t min_ptload_vaddr = ~0ULL;
     for (int i = 0; i < eh.e_phnum; ++i) {
         Elf64_Phdr* ph = (Elf64_Phdr*)((uint8_t*)ph_buf + i * eh.e_phentsize);
         if (ph->p_type != PT_LOAD) continue;
         if (ph->p_memsz == 0) continue;
+
+        if (ph->p_vaddr < min_ptload_vaddr) min_ptload_vaddr = ph->p_vaddr;
 
         PrintfQEMU("[elf] PH[%d]: off=%llu vaddr=0x%llx filesz=%llu memsz=%llu flags=0x%x\n",
                    i, (unsigned long long)ph->p_offset, (unsigned long long)ph->p_vaddr,
@@ -150,10 +217,8 @@ int elf64_load_process(const char* path, uint64_t user_stack_size,
         uint64_t seg_size = (ph->p_filesz > ph->p_memsz) ? ph->p_filesz : ph->p_memsz;
         uint64_t seg_va   = load_base + ph->p_vaddr;
         uint64_t va_start = seg_va & ~0xFFFULL;
-        uint64_t va_end   = (ph->p_vaddr + seg_size + 0xFFFULL) & ~0xFFFULL;
-        uint64_t map_size = ((load_base + va_end) & ~0ULL) - va_start; // same size; load_base cancels in pages
-        // correct computation without relying on above line ambiguity
-        map_size = ((seg_va + seg_size + 0xFFFULL) & ~0xFFFULL) - va_start;
+        uint64_t va_end   = (seg_va + seg_size + 0xFFFULL) & ~0xFFFULL;
+        uint64_t map_size = va_end - va_start;
 
         uint64_t flags = PAGE_PRESENT | PAGE_USER | PAGE_WRITABLE;
         for (uint64_t off = 0; off < map_size; off += 0x1000ULL) {
@@ -163,20 +228,30 @@ int elf64_load_process(const char* path, uint64_t user_stack_size,
             paging_map_page(va_start + off, (uint64_t)page, flags);
         }
 
-        if (fs_seek(f, (int)ph->p_offset, FS_SEEK_SET) < 0) { PrintfQEMU("[elf] seek to seg %d offset %llu failed\n", i, (unsigned long long)ph->p_offset); kfree(ph_buf); fs_close(f); asm volatile("push %0; popfq"::"r"(saved_rflags):"memory"); return -1; }
         if (ph->p_filesz) {
+            // Чтение сегмента из нового дескриптора (чтобы избежать багов seek у VFS на исходном f)
+            fs_file_t* fseg = fs_open(path, FS_OPEN_READ);
+            if (!fseg) { PrintfQEMU("[elf] open for seg %d failed\n", i); kfree(ph_buf); fs_close(f); asm volatile("push %0; popfq"::"r"(saved_rflags):"memory"); return -1; }
+            if (fs_seek(fseg, (int)ph->p_offset, FS_SEEK_SET) < 0) {
+                PrintfQEMU("[elf] seek to seg %d offset %llu failed\n", i, (unsigned long long)ph->p_offset);
+                fs_close(fseg);
+                kfree(ph_buf); fs_close(f);
+                asm volatile("push %0; popfq"::"r"(saved_rflags):"memory");
+                return -1;
+            }
             uint64_t remaining = ph->p_filesz;
             uint8_t* dst = (uint8_t*)(uintptr_t)(load_base + ph->p_vaddr);
             static uint8_t kbuf_static[4096] __attribute__((aligned(16)));
             const size_t CHUNK = sizeof(kbuf_static);
             while (remaining) {
                 size_t want = (remaining > CHUNK) ? CHUNK : (size_t)remaining;
-                int rr = fs_read(f, kbuf_static, want);
-                if (rr <= 0) { kfree(ph_buf); fs_close(f); asm volatile("push %0; popfq"::"r"(saved_rflags):"memory"); return -1; }
+                int rr = fs_read(fseg, kbuf_static, want);
+                if (rr <= 0) { fs_close(fseg); kfree(ph_buf); fs_close(f); asm volatile("push %0; popfq"::"r"(saved_rflags):"memory"); return -1; }
                 memcpy(dst, kbuf_static, (size_t)rr);
                 dst += (size_t)rr;
                 remaining -= (uint64_t)rr;
             }
+            fs_close(fseg);
         }
         if (ph->p_memsz > ph->p_filesz) {
             uint64_t bss_start = load_base + ph->p_vaddr + ph->p_filesz;
@@ -284,7 +359,11 @@ int elf64_load_process(const char* path, uint64_t user_stack_size,
         uint64_t adj_entry = load_base + eh.e_entry;
         if (adj_entry >= start && adj_entry < end) { entry_ok = true; break; }
     }
-    if (!entry_ok) { PrintfQEMU("[elf] entry 0x%llx not in PT_LOAD, forcing to 0x%llx\n", (unsigned long long)(load_base + eh.e_entry), (unsigned long long)(load_base + first_load_vaddr)); eh.e_entry = first_load_vaddr; }
+    if (!entry_ok) {
+        uint64_t forced = load_base + (have_first ? first_load_vaddr : (min_ptload_vaddr==~0ULL?0:min_ptload_vaddr));
+        PrintfQEMU("[elf] entry 0x%llx not in PT_LOAD, forcing to 0x%llx\n", (unsigned long long)(load_base + eh.e_entry), (unsigned long long)forced);
+        eh.e_entry = have_first ? first_load_vaddr : (min_ptload_vaddr==~0ULL?0:min_ptload_vaddr);
+    }
 
     // Заполним auxv-поля для ядра (AT_PHDR/AT_PHENT/AT_PHNUM/AT_ENTRY)
     // Правильно вычислим адрес PHDR в памяти: либо через PT_PHDR, либо конвертируя e_phoff через PT_LOAD, содержащий его
@@ -304,7 +383,7 @@ int elf64_load_process(const char* path, uint64_t user_stack_size,
                 Elf64_Phdr* ph = (Elf64_Phdr*)((uint8_t*)ph_buf + i * eh.e_phentsize);
                 if (ph->p_type != PT_LOAD) continue;
                 uint64_t off = eh.e_phoff;
-                if (off >= ph->p_offset && off < (ph->p_offset + ph->p_filesz)){
+                if (off >= ph->p_offset and off < (ph->p_offset + ph->p_filesz)){
                     uint64_t delta = off - ph->p_offset;
                     at_phdr_addr = load_base + ph->p_vaddr + delta;
                     break;
@@ -318,6 +397,13 @@ int elf64_load_process(const char* path, uint64_t user_stack_size,
     elf_last_at_phent = eh.e_phentsize;
     elf_last_at_phnum = eh.e_phnum;
     elf_last_at_entry = load_base + eh.e_entry;
+    if (elf_last_at_entry == 0) {
+        // Жёсткий fallback: первый PT_LOAD как точка входа (обычно 0x400000)
+        uint64_t fallback_entry = load_base + (have_first ? first_load_vaddr : (min_ptload_vaddr==~0ULL?0:min_ptload_vaddr));
+        elf_last_at_entry = fallback_entry;
+        PrintfQEMU("[elf] WARN: at_entry==0, fallback to first/min PT_LOAD: 0x%llx\n",
+                   (unsigned long long)elf_last_at_entry);
+    }
     elf_last_load_base = load_base;
     // brk: конец PT_LOAD, выровненный по странице
     if (max_load_end) {
@@ -333,8 +419,16 @@ int elf64_load_process(const char* path, uint64_t user_stack_size,
     if (user_stack_size < 16384) user_stack_size = 16384;
     const uint64_t USER_STACK_TOP_VA = 0x30000000ULL; // 768 MiB, далеко от кучи ядра
     uint64_t u_top = USER_STACK_TOP_VA;
-    uint64_t s_start = (u_top - user_stack_size) & ~0xFFFULL;
+    // Добавим запас снизу стека (64 КБ), чтобы избежать раннего #PF при выравнивании и первых push
+    uint64_t map_base = u_top - user_stack_size;
+    if (map_base > 0x10000ULL) map_base -= 0x10000ULL; else map_base = 0;
+    uint64_t s_start = map_base & ~0xFFFULL;
     uint64_t s_end   = (u_top + 0xFFFULL) & ~0xFFFULL;
+
+    PrintfQEMU("[elf] stack map: start=0x%llx end=0x%llx u_top=0x%llx\n",
+               (unsigned long long)s_start,
+               (unsigned long long)s_end,
+               (unsigned long long)u_top);
 
     for (uint64_t va = s_start; va < s_end; va += 0x1000ULL) {
         void* page_raw = elf_alloc_page4k();
@@ -345,7 +439,12 @@ int elf64_load_process(const char* path, uint64_t user_stack_size,
         memset((void*)(uintptr_t)va, 0, 0x1000);
     }
 
-    if (out_entry) *out_entry = load_base + eh.e_entry;
+    if (out_entry) {
+        *out_entry = load_base + eh.e_entry;
+        if (*out_entry == 0) {
+            *out_entry = elf_last_at_entry;
+        }
+    }
     if (out_user_stack_top) *out_user_stack_top = u_top - 8; // обеспечить RSP%16==8 на входе в _start
 
     // восстановить флаги прерываний

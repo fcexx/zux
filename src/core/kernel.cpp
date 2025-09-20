@@ -22,6 +22,9 @@
 
 extern "C" char g_tty_private_tag = 0;
 
+// Глобальный адрес AT_RANDOM из пользовательского стека, используется для TLS canary
+uint64_t g_at_random_ptr = 0;
+
 extern "C" uint64_t sys_execve(const char* path, const char* const* argv, const char* const* envp);
 
 typedef unsigned int uint32_t;
@@ -118,25 +121,17 @@ void list_directory_contents(const char* path) {
         int result = fs_readdir(dir, &entry);
         
         if (result != 0) {
-            // ����� ��� ����ᥩ ��� �ந��諠 �訡��
             break;
         }
         
         count++;
+        kprintf("%s", entry.name);
         
-        // �஢��塞, �� ��� �� ���⮥
-        if (entry.name[0] == '\0') {
-            continue;
+        if (entry.attributes & FS_ATTR_DIRECTORY) {
+            kprintf("/");
         }
-
-        // ��।��塞 ⨯ �����
-        const char* type = (entry.attributes & FS_ATTR_DIRECTORY) ? "DIR" : "FILE";
         
-        // �뢮��� ���ଠ�� � 䠩��/�����
-        kprintf(" [%s] %s", type, entry.name);
-        
-        // �᫨ �� 䠩�, �����뢠�� ࠧ���
-        if (!(entry.attributes & FS_ATTR_DIRECTORY)) {
+        if (entry.size > 0) {
             kprintf(" (%u bytes)", (unsigned int)entry.size);
         }
         
@@ -145,12 +140,12 @@ void list_directory_contents(const char* path) {
     
     kprintf("total %d\n", count);
     
-    // ����뢠�� ��४���
+    // 뢠 ४
     fs_closedir(dir);
 }
 
 
-// user_demo 㤠��: ����� ����㦠�� ELF �� 䠩����� ��⥬�
+// user_demo 㤠:  㦠 ELF  䠩 ⥬
 
 static int kexecve(const char* path, const char* const* argv){
     if (!path) return -22;
@@ -178,7 +173,7 @@ static int kexecve(const char* path, const char* const* argv){
     uint8_t rnd[16];
     uint64_t t = pit_ticks ? pit_ticks : 0x12345678ULL;
     for (int i=0;i<16;i++){ rnd[i]=(uint8_t)((t>>((i*5)%32))^((uint64_t)(0x9e + 3*i))); }
-    extern uint64_t elf_last_at_phdr, elf_last_at_phent, elf_last_at_phnum, elf_last_at_entry;
+    // auxv, объявлены в include/elf.h
     uint64_t at_phdr = elf_last_at_phdr;
     uint64_t at_phent = elf_last_at_phent;
     uint64_t at_phnum = elf_last_at_phnum;
@@ -225,7 +220,7 @@ static int kexecve(const char* path, const char* const* argv){
     }
 
     const char* base = path; for (const char* p = path; *p; ++p) if (*p=='/') base = p+1;
-    thread_register_user(entry, sp, base && *base ? base : "user");
+    thread_register_user(at_entry, sp, base && *base ? base : "user");
     {
         thread_t* ut = thread_get_current_user();
         if (ut) {
@@ -237,13 +232,17 @@ static int kexecve(const char* path, const char* const* argv){
             ut->fds[0]=f0; ut->fds[1]=f1; ut->fds[2]=f2;
         }
     }
-    PrintfQEMU("[kexecve] path=%s rip=0x%llx rsp=0x%llx\n", path, (unsigned long long)entry, (unsigned long long)sp);
+    // Сохраним AT_RANDOM для последующей инициализации TLS canary
+    // Сохраним адрес AT_RANDOM для инициализации TLS canary в arch_prctl
+    extern uint64_t g_at_random_ptr;
+    g_at_random_ptr = at_random_ptr;
+    PrintfQEMU("[kexecve] path=%s entry(raw)=0x%llx at_entry=0x%llx rsp=0x%llx at_random=0x%llx\n", path, (unsigned long long)entry, (unsigned long long)at_entry, (unsigned long long)sp, (unsigned long long)g_at_random_ptr);
     asm volatile(
         "xor %%rbx, %%rbx; xor %%rdi, %%rdi; xor %%rsi, %%rsi; xor %%rdx, %%rdx;\n"
         "xor %%r12, %%r12; xor %%r13, %%r13; xor %%r14, %%r14; xor %%r15, %%r15;\n"
         :::"rbx","rdi","rsi","rdx","r12","r13","r14","r15");
     asm volatile("sti");
-    enter_user_mode(entry, sp);
+    enter_user_mode(at_entry, sp);
     return 0;
 }
 
@@ -369,10 +368,11 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
         }
     }
 
-    // Если сюда дошли — запускаем сразу шелл (busybox applet) с argv0="sh"
+    // Если сюда дошли — запускаем сразу шелл (busybox applet)
     PrintfQEMU("Loading /bin/busybox fallback...\n");
     {
-        const char* argv_fallback[] = { "sh", nullptr };
+        // Используем форму "busybox sh -i", чтобы applet определялся надёжно и был интерактивным
+        const char* argv_fallback[] = { "busybox", "sh", "-i", nullptr };
         (void)kexecve("/bin/busybox", argv_fallback);
     }
 

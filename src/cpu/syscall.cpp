@@ -204,6 +204,9 @@ extern "C" uint64_t syscall_entry_c(SyscallFrame* f){
         case 218: /* set_tid_address */ return 0;
         case 219: /* restart_syscall (stub) */ return 0;
         case 228: /* clock_gettime */ return (uint64_t)sys_clock_gettime((int)f->a1, (void*)f->a2);
+        case 232: /* epoll_wait (stub) */ return 0; // нет событий
+        case 233: /* epoll_ctl  (stub) */ return 0; // успех-заглушка
+        case 234: /* tgkill     (stub) */ return 0; // считаем доставлено
         case 231: /* exit_group */ sys_exit((int)f->a1); return 0;
         case 257: /* openat */ return (uint64_t)sys_openat((int)f->a1, (const char*)f->a2, (int)f->a3, (int)f->a4);
         case 262: /* newfstatat */ return (uint64_t)sys_newfstatat((int)f->a1, (const char*)f->a2, (void*)f->a3, (int)f->a4);
@@ -216,6 +219,7 @@ extern "C" uint64_t syscall_entry_c(SyscallFrame* f){
             if (!p) return -22;
             for (unsigned long i=0;i<n;i++) p[i]=(uint8_t)((pit_ticks>>((i*7)%32))^0x5a);
             return (long)n; }
+        case 334: /* rseq (stub) */ return (uint64_t)-38; // -ENOSYS, libc отключит rseq
         default:
             PrintfQEMU("syscall64: unknown nr=%llu (raw=%llu)\n", (unsigned long long)nr, (unsigned long long)nr_raw);
             return (uint64_t)-38; // -ENOSYS
@@ -233,31 +237,27 @@ void syscall_x64_init(){
     uint64_t efer = read_msr(IA32_EFER);
     efer |= 1ULL; // SCE
     write_msr(IA32_EFER, efer);
-    PrintfQEMU("[syscall] EFER set: 0x%llx\n", (unsigned long long)efer);
+    // PrintfQEMU("[syscall] EFER set: 0x%llx\n", (unsigned long long)efer);
 
     // Program STAR: upper holds user CS, lower holds kernel CS
     uint64_t star = ((uint64_t)USER_CS << 48) | ((uint64_t)KERNEL_CS << 32);
     write_msr(IA32_STAR, star);
-    PrintfQEMU("[syscall] STAR written: 0x%llx\n", (unsigned long long)star);
+    // PrintfQEMU("[syscall] STAR written: 0x%llx\n", (unsigned long long)star);
 
     // Program LSTAR with entry point
     write_msr(IA32_LSTAR, (uint64_t)(void*)syscall_entry);
-    PrintfQEMU("[syscall] LSTAR=0x%llx\n", (unsigned long long)(uint64_t)(void*)syscall_entry);
+    // PrintfQEMU("[syscall] LSTAR=0x%llx\n", (unsigned long long)(uint64_t)(void*)syscall_entry);
 
     // Mask IF|DF on entry (clear those bits in RFLAGS). Keep TF off too optionally.
     write_msr(IA32_FMASK, 0x300ULL);
-    PrintQEMU("[syscall] FMASK written\n");
+    // PrintQEMU("[syscall] FMASK written\n");
 
-    PrintfQEMU("[syscall] STAR=0x%llx LSTAR=0x%llx EFER=0x%llx\n",
-        (unsigned long long)star,
-        (unsigned long long)(uint64_t)(void*)syscall_entry,
-        (unsigned long long)efer);
 }
 
 static void sys_yield() { thread_yield(); }
 
 static long sys_write(int fd, const char* buf, unsigned long len){
-    PrintfQEMU("[write] fd=%d buf=0x%llx len=%llu\n", fd, (unsigned long long)(uint64_t)buf, (unsigned long long)len);
+    // PrintfQEMU("[write] fd=%d buf=0x%llx len=%llu\n", fd, (unsigned long long)(uint64_t)buf, (unsigned long long)len);
     if (fd == 1 || fd == 2 || is_tty_fd(fd)) {
         if (!buf || len == 0) return 0;
         auto put_tty_char = [](char c){
@@ -277,9 +277,6 @@ static long sys_write(int fd, const char* buf, unsigned long len){
                     // снимем несколько байт кода по адресу RIP
                     unsigned char op[8] = {0};
                     for (int i=0;i<8;i++) op[i] = ((volatile unsigned char*)rip)[i];
-                    PrintfQEMU("[write1] repeat x%lu same buf=%p len=%lu caller=0x%llx op=%02x %02x %02x %02x %02x %02x %02x %02x\n",
-                        repeat, last_buf, last_len, (unsigned long long)rip,
-                        op[0],op[1],op[2],op[3],op[4],op[5],op[6],op[7]);
                 }
             } else {
                 repeat = 0; last_buf = buf; last_len = len;
@@ -289,7 +286,7 @@ static long sys_write(int fd, const char* buf, unsigned long len){
                     unsigned char c = (unsigned char)buf[i];
                     if (c=='\n' || (c>=32 && c<127)) {
                         // печатаем как текст
-                        PrintfQEMU("[write1] preview: ");
+                        // PrintfQEMU("[write1] preview: ");
                         for (unsigned long k=0;k<n;k++){
                             unsigned char cc=(unsigned char)buf[k];
                             PrintfQEMU("%c", (cc=='\n'||(cc>=32&&cc<127))?cc:'.');
@@ -301,9 +298,11 @@ static long sys_write(int fd, const char* buf, unsigned long len){
                         out[j++] = hex[(c>>4)&0xF]; out[j++] = hex[c&0xF]; out[j++] = ' ';
                     }
                 }
-                if (j) { out[j?j-1:0] = '\0'; PrintfQEMU("[write1] hex: %s\n", out); }
-            }
-        }
+                if (j) {
+                    out[j?j-1:0] = '\0'; // PrintfQEMU("[write1] hex: %s\n", out);
+                }
+            } // end else (hex preview)
+        } // end if (fd==1)
         // stderr (fd==2) больше не дублируем в консоль и лог, просто печатаем ниже общей петлёй
         for (unsigned long i = 0; i < len; ++i) put_tty_char(buf[i]);
         return (long)len;
@@ -314,7 +313,7 @@ static long sys_write(int fd, const char* buf, unsigned long len){
 struct linux_iovec { const void* iov_base; uint64_t iov_len; };
 
 static long sys_writev(int fd, const void* iov, unsigned long iovcnt){
-    PrintfQEMU("[writev] fd=%d iov=0x%llx cnt=%llu\n", fd, (unsigned long long)(uint64_t)iov, (unsigned long long)iovcnt);
+    // PrintfQEMU("[writev] fd=%d iov=0x%llx cnt=%llu\n", fd, (unsigned long long)(uint64_t)iov, (unsigned long long)iovcnt);
     if (!iov || iovcnt == 0) return 0;
     const linux_iovec* vec = (const linux_iovec*)iov;
     if (iovcnt > 1024) iovcnt = 1024; // простая защита
@@ -323,7 +322,7 @@ static long sys_writev(int fd, const void* iov, unsigned long iovcnt){
         const char* base = (const char*)vec[i].iov_base;
         unsigned long len = (unsigned long)vec[i].iov_len;
         if (!base || len == 0) continue;
-        PrintfQEMU("[writev] part[%llu] base=0x%llx len=%llu\n", (unsigned long long)i, (unsigned long long)(uint64_t)base, (unsigned long long)len);
+        // PrintfQEMU("[writev] part[%llu] base=0x%llx len=%llu\n", (unsigned long long)i, (unsigned long long)(uint64_t)base, (unsigned long long)len);
         long r = sys_write(fd, base, len);
         if (r < 0) return (total > 0) ? total : r;
         total += r;
@@ -344,7 +343,7 @@ static void sys_exit(int code) {
     } else {
         thread_t* cur = thread_current();
         if (cur) {
-            PrintfQEMU("[exit] kernel-thread pid=%d name=%s code=%d\n", (int)cur->tid, cur->name, code);
+            //PrintfQEMU("[exit] kernel-thread pid=%d name=%s code=%d\n", (int)cur->tid, cur->name, code);
             // Никогда не останавливаем idle (pid==0)
             if (cur->tid != 0) {
                 thread_stop(cur->tid);
@@ -385,7 +384,7 @@ static long sys_open(const char* path, int flags){
 }
 
 static long sys_read(int fd, void* buf, unsigned long len){
-    PrintfQEMU("[read] fd=%d buf=0x%llx len=%llu\n", fd, (unsigned long long)(uint64_t)buf, (unsigned long long)len);
+    //PrintfQEMU("[read] fd=%d buf=0x%llx len=%llu\n", fd, (unsigned long long)(uint64_t)buf, (unsigned long long)len);
     // stdin or /dev/tty from keyboard buffer
     if ((fd == 0 || is_tty_fd(fd)) && buf && len > 0) {
         unsigned long i = 0;
@@ -757,13 +756,28 @@ static uint64_t user_brk_base = 0;
 static uint64_t user_brk_end  = 0;
 static uint64_t mmap_next     = 0x40000000ULL; // 1GB: выше зон ELF (0x20000000) и стека (0x30000000)
 
+// Небольшой статический пул для пользовательских страниц (8 МБ)
+static uint8_t user_page_pool[8 * 1024 * 1024] __attribute__((aligned(4096)));
+static uint32_t user_page_pool_used_pages = 0; // счётчик 4К страниц
+static inline void* user_alloc_page4k() {
+    const uint32_t max_pages = (uint32_t)(sizeof(user_page_pool) / 4096);
+    if (user_page_pool_used_pages >= max_pages) return nullptr;
+    void* p = (void*)(user_page_pool + (size_t)user_page_pool_used_pages * 4096);
+    user_page_pool_used_pages++;
+    return p;
+}
+
 static void map_user_pages(uint64_t va_start, uint64_t size){
     uint64_t va = va_start & ~0xFFFULL;
     uint64_t va_end = (va_start + size + 0xFFFULL) & ~0xFFFULL;
     for (; va < va_end; va += 0x1000ULL){
-        void* raw = kmalloc(0x2000);
-        if (!raw) break;
-        uint64_t phys = ((uint64_t)raw + 0xFFFULL) & ~0xFFFULL;
+        void* raw = user_alloc_page4k();
+        if (!raw) raw = kmalloc_aligned(0x1000, 0x1000);
+        if (!raw) {
+            PrintfQEMU("[usermem] WARN: out of memory mapping VA=0x%llx\n", (unsigned long long)va);
+            break;
+        }
+        uint64_t phys = (uint64_t)raw; // уже выровнено
         paging_map_page(va, phys, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
         memset((void*)va, 0, 0x1000);
     }
@@ -993,10 +1007,17 @@ static long sys_arch_prctl(long code, uint64_t addr){
                    (unsigned long long)addr,
                    (unsigned long long)map_start,
                    (unsigned long long)(map_start + map_size));
-        // Минимальный TCB: FS:0 должно указывать само на себя
+        // Минимальный TCB для glibc/musl: FS:0 -> self, FS:0x28 -> stack canary
         if (addr) {
             uint64_t* tcb = (uint64_t*)(uint64_t)addr;
-            tcb[0] = addr; // self
+            tcb[0] = addr; // self pointer
+            extern uint64_t g_at_random_ptr; // из kernel.cpp
+            // Если у нас есть AT_RANDOM в пользовательском пространстве — скопируем туда-обратно как канарейку
+            if (g_at_random_ptr) {
+                uint64_t can = *(const uint64_t*)(uint64_t)g_at_random_ptr;
+                // Смещение 0x28 часто используется как canary в TLS для x86_64
+                *(uint64_t*)((uint64_t)addr + 0x28) = can;
+            }
         }
         // Установим FS base через WRMSR (IA32_FS_BASE)
         const uint32_t IA32_FS_BASE = 0xC0000100;

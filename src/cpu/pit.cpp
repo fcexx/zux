@@ -15,18 +15,18 @@ void pit_handler(cpu_registers_t* regs) {
     pit_ticks++;
     
 
-    if (pit_ticks % (pit_frequency / 50) == 0) { // More frequent updates for better responsiveness
+    if (pit_ticks % 50 == 0) { // More frequent updates for better responsiveness
         if (vbedbuff_is_initialized()) {
             vbedbuff_swap();
         }
     }
 
     // Убираем обновление курсора из таймера - курсор должен гореть постоянно
-    // if (pit_ticks % 250 == 0) {
-    //     if (vbedbuff_is_initialized()) {
-    //         vbetty_update_cursor();
-    //     }
-    // }
+    if (pit_ticks % 250 == 0) {
+        if (vbedbuff_is_initialized()) {
+            vbetty_update_cursor();
+        }
+    }
     
     // Вызываем планировщик реже - каждые 10 тиков (10 мс при 1000 Гц)
     if (init && (pit_ticks % 10 == 0)) {

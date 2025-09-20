@@ -38,23 +38,23 @@ void heap_init() {
 // Heap allocation wrapper for kernel use
 void* kmalloc(size_t size) {
     void* p = g_heap ? g_heap->malloc(size) : nullptr;
-    PrintfQEMU("[heap.api] kmalloc(%zu) -> %p\n", size, p);
+    // PrintfQEMU("[heap.api] kmalloc(%zu) -> %p\n", size, p);
     return p;
 }
 
 void* kmalloc_aligned(size_t size, size_t alignment) {
     void* p = g_heap ? g_heap->malloc_aligned(size, alignment) : nullptr;
-    PrintfQEMU("[heap.api] kmalloc_aligned(%zu,%zu) -> %p\n", size, alignment, p);
+    // PrintfQEMU("[heap.api] kmalloc_aligned(%zu,%zu) -> %p\n", size, alignment, p);
     return p;
 }
 
 void kfree(void* ptr) {
-    PrintfQEMU("[heap.api] kfree(%p)\n", ptr);
+    // PrintfQEMU("[heap.api] kfree(%p)\n", ptr);
     if (g_heap) g_heap->mfree(ptr);
 }
 
 void* krealloc(void* ptr, size_t new_size) {
     void* p = g_heap ? g_heap->realloc(ptr, new_size) : nullptr;
-    PrintfQEMU("[heap.api] krealloc(%p,%zu) -> %p\n", ptr, new_size, p);
+    // PrintfQEMU("[heap.api] krealloc(%p,%zu) -> %p\n", ptr, new_size, p);
     return p;
 }

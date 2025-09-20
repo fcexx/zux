@@ -60,6 +60,7 @@ solar.img: hda/boot/solarImg hda/boot/grub/grub.cfg
 		sudo mkdir -p $(BUILDDIR)/mnt_tmp/boot/grub; \
 		sudo cp -rf hda/* $(BUILDDIR)/mnt_tmp/; \
 		sudo cp hda/boot/solarImg $(BUILDDIR)/mnt_tmp/boot/solarImg; \
+		sudo cp hda/bin/busybox $(BUILDDIR)/mnt_tmp/bin/busybox; \
 		sudo cp hda/boot/grub/grub.cfg $(BUILDDIR)/mnt_tmp/boot/grub/grub.cfg; \
 		sudo grub-install --target=i386-pc --boot-directory=$(BUILDDIR)/mnt_tmp/boot --modules="fat multiboot2 normal boot part_msdos" $$LOOP_DEVICE; \
 		sudo umount $(BUILDDIR)/mnt_tmp; \

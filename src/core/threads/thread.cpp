@@ -69,7 +69,6 @@ thread_t* thread_create(void (*entry)(void), const char* name) {
     t->tid = thread_count;
     strncpy(t->name, name, sizeof(t->name));
     threads[thread_count++] = t;
-    kprintf("thread_create: created thread '%s' with pid %d\n", t->name, t->tid);
     return t;
 }
 
@@ -88,8 +87,6 @@ thread_t* thread_register_user(uint64_t user_rip, uint64_t user_rsp, const char*
     strncpy(t->name, name ? name : "user", sizeof(t->name));
     threads[thread_count++] = t;
     current_user = t;
-    kprintf("thread_register_user: registered user task '%s' with pid %d rip=0x%llx rsp=0x%llx\n",
-            t->name, t->tid, (unsigned long long)t->user_rip, (unsigned long long)t->user_stack);
     return t;
 }
 
@@ -105,7 +102,6 @@ void thread_stop(int pid) {
     for (int i = 0; i < thread_count; ++i) {
         if (threads[i] && threads[i]->tid == pid && threads[i]->state != THREAD_TERMINATED) {
             threads[i]->state = THREAD_TERMINATED;
-            kprintf("thread_stop: stopped thread %d (%s)\n", pid, threads[i]->name);
             return;
         }
     }
