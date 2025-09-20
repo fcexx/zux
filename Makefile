@@ -27,72 +27,53 @@ OBJECTS = $(ASM_OBJECTS) $(GAS_OBJECTS) $(C_OBJECTS) $(LIBC_OBJECTS)
 
 .PHONY: all clean run
 
-all: $(BINDIR)/solarImg solar.img
+all: $(BINDIR)/solarImg solar.iso
 
 $(BINDIR)/solarImg: $(OBJECTS)
 	@mkdir -p $(dir $@)
-	$(LD) -n -o $@ -T linker.ld $(OBJECTS)
+	@echo Linking...
+	@$(LD) -n -o $@ -T linker.ld $(OBJECTS)
 
 hda/boot/solarImg: $(BINDIR)/solarImg
 	@mkdir -p $(dir $@)
-	cp $< $@
+	@cp $< $@
 
-solar.img: hda/boot/solarImg hda/boot/grub/grub.cfg
-	@echo "Creating bootable FAT32 image: $@"
-	sh -c 'set -e; \
-		rm -rf $(BUILDDIR)/mnt_tmp; \
-		LOOP_DEVICE=$$(sudo losetup -j $@ | awk "{print \$$1}" | tr -d ":"); \
-		if [ -n "$$LOOP_DEVICE" ]; then \
-			sudo umount $${LOOP_DEVICE}p1 2>/dev/null || true; \
-			sudo losetup -d $$LOOP_DEVICE 2>/dev/null || true; \
-		fi; \
-		sudo dd if=/dev/zero of=$@ bs=1M count=64; \
-		sudo parted -s $@ mklabel msdos; \
-		sudo parted -s $@ mkpart primary fat32 1MiB 100%; \
-		sudo parted -s $@ set 1 boot on; \
-		LOOP_DEVICE=$$(sudo losetup -f --show $@); \
-		sudo partprobe $$LOOP_DEVICE; \
-		sleep 3; \
-		PARTITION_DEVICE=$${LOOP_DEVICE}p1; \
-		sudo mkfs.fat -F 32 $$PARTITION_DEVICE; \
-		sudo mkdir -p $(BUILDDIR)/mnt_tmp; \
-		sudo mount $$PARTITION_DEVICE $(BUILDDIR)/mnt_tmp; \
-		sudo mkdir -p $(BUILDDIR)/mnt_tmp/boot/grub; \
-		sudo cp -rf hda/* $(BUILDDIR)/mnt_tmp/; \
-		sudo cp hda/boot/solarImg $(BUILDDIR)/mnt_tmp/boot/solarImg; \
-		sudo cp hda/bin/busybox $(BUILDDIR)/mnt_tmp/bin/busybox; \
-		sudo cp hda/boot/grub/grub.cfg $(BUILDDIR)/mnt_tmp/boot/grub/grub.cfg; \
-		sudo grub-install --target=i386-pc --boot-directory=$(BUILDDIR)/mnt_tmp/boot --modules="fat multiboot2 normal boot part_msdos" $$LOOP_DEVICE; \
-		sudo umount $(BUILDDIR)/mnt_tmp; \
-		sudo losetup -d $$LOOP_DEVICE; \
-		sudo rm -rf $(BUILDDIR)/mnt_tmp; \
-		sudo chown $(USER):$(USER) $@; \
-	'
+solar.iso: hda/boot/solarImg hda/boot/grub/grub.cfg
+	@echo "Creating bootable ISO: $@"
+	@mkdir -p $(BUILDDIR)/isodir/boot/grub
+	@cp hda/boot/solarImg $(BUILDDIR)/isodir/boot/solarImg
+	@-cp hda/boot/bzbx $(BUILDDIR)/isodir/boot/bzbx
+	@cp hda/boot/grub/grub.cfg $(BUILDDIR)/isodir/boot/grub/grub.cfg
+	@grub-mkrescue -o $@ $(BUILDDIR)/isodir
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.asm
 	@mkdir -p $(dir $@)
-	$(AS) -f elf64 $< -o $@
+	@echo "NASM		$<"
+	@$(AS) -f elf64 $< -o $@
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.S
 	@mkdir -p $(dir $@)
-	$(GAS) --64 $< -o $@
+	@echo "GAS		$<"
+	@$(GAS) --64 $< -o $@
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.cpp
 	@mkdir -p $(dir $@)
-	$(CC) -c $< -o $@ -std=c++17 -ffreestanding -fno-exceptions -fno-rtti -Wall -Wextra -g -Iinclude
+	@echo "CPP		$<"
+	@$(CC) -c $< -o $@ -std=c++17 -ffreestanding -fno-exceptions -fno-rtti -Wall -Wextra -g -Iinclude -w
 
 $(OBJDIR)/%.o: libc/%.cpp
 	@mkdir -p $(dir $@)
-	$(CC) -c $< -o $@ -std=c++17 -ffreestanding -fno-exceptions -fno-rtti -Wall -Wextra -g -Iinclude
+	@echo "CPP		$<"
+	@$(CC) -c $< -o $@ -std=c++17 -ffreestanding -fno-exceptions -fno-rtti -Wall -Wextra -g -Iinclude -w
 
 clean:
-	sudo rm -rf $(BUILDDIR) solar.img
+	sudo rm -rf $(BUILDDIR) solar.iso
 
 run:
-	qemu-system-x86_64 -drive format=raw,file=solar.img -m 512M -debugcon stdio
+	@qemu-system-x86_64 -cdrom solar.iso -m 512M -debugcon stdio
 
 debug:
-	qemu-system-x86_64 -drive format=raw,file=solar.img -m 512M -s -S -debugcon stdio
+	qemu-system-x86_64 -cdrom solar.iso -m 512M -s -S -debugcon stdio
 
 vmdk:
-	qemu-img convert -f raw -O vmdk solar.img solar.vmdk
+	@echo "Not supported for ISO build"

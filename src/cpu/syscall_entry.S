@@ -79,6 +79,7 @@ syscall_entry:
     // clear trampoline flag
     mov qword ptr [rip + exec_trampoline], 0
     iretq
+// ensure newline at end of file
 1:
     // Restore user state and return via IRET
     // Restore return value to RAX

@@ -4,10 +4,10 @@
 static void (*irq_handlers[16])() = {nullptr};
 
 void pic_init() {
-    uint8_t a1, a2;
-    
-    a1 = inb(0x21);
-    a2 = inb(0xA1);
+    // Сохраняли значения IMR в a1/a2, но не использовали — уберём предупреждение
+    uint8_t a1 = inb(0x21);
+    uint8_t a2 = inb(0xA1);
+    (void)a1; (void)a2;
     
     outb(0x20, 0x11);
     outb(0xA0, 0x11);

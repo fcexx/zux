@@ -3,7 +3,7 @@
 #include <debug.h>
 #include <string.h>
 #include <pit.h>
-#include <vbetty.h>
+#include <vga.h>
 #include <context.h>
 
 #define MAX_THREADS 32

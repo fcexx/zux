@@ -37,4 +37,5 @@ enter_user_mode_asm:
     pushq %rdi               // RIP (entry)
 
     cld
-    iretq 
+    iretq
+// ensure newline at end of file

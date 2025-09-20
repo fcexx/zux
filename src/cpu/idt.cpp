@@ -1,16 +1,26 @@
 #include <idt.h>
 #include <debug.h>
+#include <vga.h>
 #include <pic.h>
 #include <stdint.h>
-#include <vbetty.h>
-#include <vbedbuff.h>
 #include <thread.h>
 
+// локальные таблицы обработчиков (неиспользуемые предупреждения устраним использованием ниже)
 static void (*irq_handlers[16])() = {nullptr};
 static void (*isr_handlers[256])(cpu_registers_t*) = {nullptr};
 
 static idt_entry_t idt[256];
 static idt_ptr_t idt_ptr;
+// сообщения об исключениях — определение для внешней декларации из idt.h
+const char* exception_messages[] = {
+    "Division By Zero","Debug","Non Maskable Interrupt","Breakpoint","Into Detected Overflow",
+    "Out of Bounds","Invalid Opcode","No Coprocessor","Double fault","Coprocessor Segment Overrun",
+    "Bad TSS","Segment not present","Stack fault","General protection fault","Page fault",
+    "Unknown Interrupt","Coprocessor Fault","Alignment Fault","Machine Check",
+    "Reserved","Reserved","Reserved","Reserved","Reserved","Reserved","Reserved","Reserved",
+    "Reserved","Reserved","Reserved","Reserved","Reserved"
+};
+
 static void ud_fault_handler(cpu_registers_t* regs) {
     // Invalid Opcode (#UD). Если из user-space — корректно завершаем текущий юзер-процесс,
     // чтобы не валить ядро из-за мусорного RIP после выхода.
@@ -26,7 +36,7 @@ static void ud_fault_handler(cpu_registers_t* regs) {
     }
     // Иначе — ядро: печатаем и стоп
     kprintf("Invalid Opcode in kernel. RIP=0x%lx\n", regs->rip);
-    vbedbuff_swap();
+    // no swap in VGA text mode
     for(;;);
 }
 
@@ -39,17 +49,23 @@ static void page_fault_handler(cpu_registers_t* regs) {
     int us = (err & 4) != 0;         // 0: supervisor, 1: user
     int rsvd = (err & 8) != 0;       // reserved bit violation
     int id = (err & 16) != 0;        // instruction fetch (if supported)
-    PrintfQEMU("PAGE FAULT: cr2=0x%x err=0x%x [P=%d W/R=%d U/S=%d RSVD=%d I/D=%d]\n", cr2, err, p, wr, us, rsvd, id);
-    PrintfQEMU("RIP=0x%x CS=0x%x RFLAGS=0x%x RSP=0x%x SS=0x%x\n", regs->rip, regs->cs, regs->rflags, regs->rsp, regs->ss);
-    PrintfQEMU("RAX=0x%x RBX=0x%x RCX=0x%x RDX=0x%x RSI=0x%x RDI=0x%x\n",
-               regs->rax, regs->rbx, regs->rcx, regs->rdx, regs->rsi, regs->rdi);
-    PrintfQEMU("R8=0x%x R9=0x%x R10=0x%x R11=0x%x R12=0x%x R13=0x%x R14=0x%x R15=0x%x\n",
-               regs->r8, regs->r9, regs->r10, regs->r11, regs->r12, regs->r13, regs->r14, regs->r15);
+    // Если fault из user-space — завершаем текущий пользовательский процесс, не падая ядром
+    if ((regs->cs & 3) == 3) {
+        PrintfQEMU("[pf user] cr2=0x%llx err=0x%llx P=%d W=%d U=%d RSVD=%d ID=%d RIP=0x%llx\n",
+                   cr2, err, p, wr, us, rsvd, id, regs->rip);
+        kprintf("User page fault: addr=0x%llx err=0x%llx RIP=0x%llx\n", cr2, err, regs->rip);
+        thread_t* user = thread_get_current_user();
+        if (user) {
+            thread_stop((int)user->tid);
+            thread_set_current_user(nullptr);
+        }
+        for(;;) { thread_yield(); }
+    }
 
-    kprintf("Critical error: Page Fault: cr2=0x%x err=0x%x [P=%d W/R=%d U/S=%d RSVD=%d I/D=%d]\n", cr2, err, p, wr, us, rsvd, id);
-    kprintf("RIP=0x%x CS=0x%x RFLAGS=0x%x RSP=0x%x SS=0x%x\n", regs->rip, regs->cs, regs->rflags, regs->rsp, regs->ss);
-    kprintf("Halted due to kernel corruption.");
-    vbedbuff_swap();
+    // Иначе — kernel fault: печатаем максимум и останавливаемся
+    PrintfQEMU("[pf kernel] cr2=0x%llx err=0x%llx [P=%d W/R=%d U/S=%d RSVD=%d I/D=%d]\n", cr2, err, p, wr, us, rsvd, id);
+    PrintfQEMU("RIP=0x%llx CS=0x%llx RFLAGS=0x%llx RSP=0x%llx SS=0x%llx\n", regs->rip, regs->cs, regs->rflags, regs->rsp, regs->ss);
+    kprintf("Critical error: Page Fault in kernel, halted.\n");
     for (;;);
 }
 
@@ -331,7 +347,7 @@ extern "C" void isr_dispatch(cpu_registers_t* regs) {
                    regs->rax, regs->rbx, regs->rcx, regs->rdx, regs->rsi, regs->rdi,
                    regs->r8, regs->r9, regs->r10, regs->r11, regs->r12, regs->r13, regs->r14, regs->r15);
             PrintfQEMU("Halted due to unhandled exception\n");
-        vbedbuff_swap();
+        // no swap in VGA text mode
             for (;;);
     }
     
@@ -340,7 +356,7 @@ extern "C" void isr_dispatch(cpu_registers_t* regs) {
     PrintfQEMU("RIP: 0x%x, RSP: 0x%x\n", regs->rip, regs->rsp);
     kprintf("Unknown interrupt %d (0x%x)\n", vec, vec);
     kprintf("RIP: 0x%x, RSP: 0x%x\n", regs->rip, regs->rsp);
-    vbedbuff_swap();
+    // no swap in VGA text mode
     for (;;);
 }
 

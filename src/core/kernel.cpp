@@ -5,10 +5,8 @@
 #include <string.h>
 #include <multiboot2.h>
 #include <heap.h>
+#include <vga.h>
 #include <pit.h>
-#include <vbe.h>
-#include <vbedbuff.h>
-#include <vbetty.h>
 #include <thread.h>
 #include <ata.h>
 #include <ps2.h>
@@ -20,10 +18,24 @@
 #include <elf.h>
 #include <stddef.h>
 
-extern "C" char g_tty_private_tag = 0;
+char g_tty_private_tag = 0;
+
+// Вернём переменные фреймбуфера, чтобы код, завязанный на них, компилировался
+extern "C" {
+    uint32_t* framebuffer_addr = 0;
+    uint32_t fb_height = 0;
+    uint32_t fb_pitch = 0;
+}
+
+// Запуск интерактивного шелла по умолчанию (busybox sh -i)
+extern "C" void start_default_shell();
 
 // Глобальный адрес AT_RANDOM из пользовательского стека, используется для TLS canary
 uint64_t g_at_random_ptr = 0;
+
+// Модуль cpio (bzbx), переданный GRUB как Multiboot2 module
+static uint64_t g_bzbx_mod_start = 0;
+static uint64_t g_bzbx_mod_size  = 0;
 
 extern "C" uint64_t sys_execve(const char* path, const char* const* argv, const char* const* envp);
 
@@ -54,6 +66,9 @@ void parse_multiboot2(uint64_t addr) {
     
     PrintfQEMU("Parsing multiboot2 info at 0x%llx\n", (unsigned long long)addr);
     
+    // Кандидаты модулей: приоритетно ищем по cmdline=\"bzbx\", иначе берём первый попавшийся
+    uint64_t fb_mod_start = 0, fb_mod_size = 0; bool have_fallback = false; bool picked_bzbx = false;
+
     for (tag = (struct multiboot2_tag*)(addr + 8);
          tag->type != 0;
          tag = (struct multiboot2_tag*)((uint8_t*)tag + ((tag->size + 7) & ~7))) {
@@ -71,81 +86,37 @@ void parse_multiboot2(uint64_t addr) {
                 PrintfQEMU("  height: %u\n", fb_tag->framebuffer_height);
                 PrintfQEMU("  pitch: %u\n", fb_tag->framebuffer_pitch);
                 PrintfQEMU("  bpp: %u\n", fb_tag->framebuffer_bpp);
-                
-                vbe_init(fb_tag->framebuffer_addr, 
-                        fb_tag->framebuffer_width, 
-                        fb_tag->framebuffer_height, 
-                        fb_tag->framebuffer_pitch, 
-                        fb_tag->framebuffer_bpp);
+                break;
+            }
+            case 3: { // Module
+                struct multiboot2_tag_module* m = (struct multiboot2_tag_module*)tag;
+                const char* cmd = (const char*)m->cmdline;
+                uint64_t start = (uint64_t)m->mod_start;
+                uint64_t end   = (uint64_t)m->mod_end;
+                uint64_t size  = (end > start) ? (end - start) : 0;
+                if (size) {
+                    // приоритет: явный модуль с именем/строкой, содержащей "bzbx"
+                    if (!picked_bzbx && cmd && *cmd && strstr(cmd, "bzbx") != nullptr) {
+                        g_bzbx_mod_start = start;
+                        g_bzbx_mod_size  = size;
+                        picked_bzbx = true;
+                    } else if (!have_fallback) {
+                        fb_mod_start = start;
+                        fb_mod_size  = size;
+                        have_fallback = true;
+                    }
+                }
                 break;
             }
         }
     }
+
+    // Если явный bzbx не найден, но есть любой модуль — используем его как fallback
+    if (!picked_bzbx && have_fallback && g_bzbx_mod_size == 0) {
+        g_bzbx_mod_start = fb_mod_start;
+        g_bzbx_mod_size  = fb_mod_size;
+    }
 }
-
-void test_thread() {
-    while (1);
-}
-
-// �ਬ�� �㭪樨 ��� �⥭�� ᮤ�ন���� �����
-void list_directory_contents(const char* path) {
-    
-    if (!path) {
-        kprintf("Error: null path\n");
-        return;
-    }
-    
-    kprintf("Listing directory: %s\n", path);
-    
-    // �஢��塞, ���樠����஢��� �� 䠩����� ��⥬�
-    if (!fs_is_initialized()) {
-        kprintf("Filesystem not initialized\n");
-        return;
-    }
-    
-    // ���뢠�� ��४���
-    fs_dir_t* dir = fs_opendir(path);
-    
-    if (!dir) {
-        kprintf("Failed to open directory: %s\n", path);
-        return;
-    }
-
-    kprintf("Directory opened successfully\n");
-    
-    fs_dirent_t entry;
-    int count = 0;
-    
-    // ��⠥� �� ����� � ��४�ਨ � ��࠭�祭���
-    while (count < 10) {
-        int result = fs_readdir(dir, &entry);
-        
-        if (result != 0) {
-            break;
-        }
-        
-        count++;
-        kprintf("%s", entry.name);
-        
-        if (entry.attributes & FS_ATTR_DIRECTORY) {
-            kprintf("/");
-        }
-        
-        if (entry.size > 0) {
-            kprintf(" (%u bytes)", (unsigned int)entry.size);
-        }
-        
-        kprintf("\n");
-    }
-    
-    kprintf("total %d\n", count);
-    
-    // 뢠 ४
-    fs_closedir(dir);
-}
-
-
-// user_demo 㤠:  㦠 ELF  䠩 ⥬
 
 static int kexecve(const char* path, const char* const* argv){
     if (!path) return -22;
@@ -262,7 +233,7 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
     paging_init();
 
     // ���� ������� �३����� (��᫥ parse_multiboot2/vbe_init, �� ��� ����㯠)
-    if (framebuffer_addr && fb_height && fb_pitch) {
+    if (false && framebuffer_addr && fb_height && fb_pitch) {
         uint64_t fb_start = (uint64_t)framebuffer_addr;
         uint64_t fb_size  = (uint64_t)fb_height * (uint64_t)fb_pitch;
         // ВЫРАВНИВАНИЕ ПО 4К СТРАНИЦЕ, а не на 16 байт
@@ -278,26 +249,23 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
     }
 
     heap_init();
-    vbedbuff_init();
-    vbetty_init();
+    vga_init();
 
     ps2_keyboard_init();
 
-    vbedbuff_clear(0x000000);
-    vbetty_set_bg_color(0x000000);
-    vbetty_set_fg_color(0xC4C4C4);
+    vga_clear(15, 0);
 
-    kprintf("\nLoading Solar...\n\n");
-    kprintf("Successfully loaded 100x75 VBE terminal (800x600x4, 32 bit color et al.)\n\n");
+    kprintf("Solar kernel v0.10.0d\n");
+    kprintf("VGA text console 80x25 initialized\n\n");
     
     thread_init();
 
-    vbedbuff_swap();
+    // swap экрана выполняется только из PIT
 
     ata_init();
     iothread_init();
 
-    vbedbuff_swap();
+    // swap экрана выполняется только из PIT
 
     // ���樠�����㥬 䠩����� ��⥬� ⮫쪮 ��᫥ ATA
     kprintf("fat32: Initializing filesystem...\n");
@@ -308,14 +276,15 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
         kprintf("fat32: Failed to initialize filesystem\n");
     }          
 
-    vbedbuff_swap();
+    // swap экрана выполняется только из PIT
 
     // ���樠������ GDT/TSS
     gdt_init();
     // �뤥�塞 � ����ࠨ���� kernel-�⥪ ��� �������� (current) ��⮪�, ���� �� ���室� �� ring3 �� IRQ �㤥� �㫥��� rsp0
     void* kstack = kmalloc_aligned(16384, 4096);
     if (!kstack) {
-        PrintQEMU("[tss] kmalloc_aligned(16K) failed\n");
+        kprintf("fatal: kmalloc_aligned failed; halted");
+        for (;;);
     }
     uint64_t kstack_top = (uint64_t)kstack + 16384;
     PrintfQEMU("[tss] kstack=%p kstack_top=0x%llx\n", kstack, (unsigned long long)kstack_top);
@@ -334,49 +303,34 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
      syscall_init();
      PrintQEMU("[syscall] init x86_64 SYSCALL...\n");
      syscall_x64_init();
-     PrintQEMU("[syscall] init done\n");
-     vbedbuff_swap();
- 
-    kprintf("OS is ready\n\n");
+     kprintf("syscalls: ready to fire\n");
+    
 
-    // Подключаем VFS из /boot/bzbx (cpio newc)
-    {
-        fs_file_t* bz = fs_open("/boot/bzbx", FS_OPEN_READ);
-        if (bz) {
-            // читаем файл целиком в память
-            uint64_t sz = bz->size;
-            uint8_t* buf = (uint8_t*)kmalloc(sz);
-            int total = 0;
-            while ((uint64_t)total < sz) {
-                int chunk = fs_read(bz, buf + total, (sz - total) > 4096 ? 4096 : (int)(sz - total));
-                if (chunk <= 0) break;
-                total += chunk;
-            }
-            if (total == (int)sz) {
-                vfs_mount_from_cpio(buf, sz);
-                fs_set_current(vfs_get_interface());
-                PrintQEMU("[init] switched to VFS (cpio)\n");
-                // debug: list VFS content
-                list_directory_contents("/");
-                list_directory_contents("/bin");
-            } else {
-                PrintQEMU("[init] failed to read /boot/bzbx\n");
-            }
-            fs_close(bz);
-        } else {
-            PrintQEMU("[init] /boot/bzbx not found\n");
-        }
+    // Монтируем VFS из модуля Multiboot2, если он передан; иначе — попытка из FAT32
+    if (g_bzbx_mod_size) {
+        kprintf("Mounting cpio from module: start=0x%llx size=%llu\n",
+                   (unsigned long long)g_bzbx_mod_start,
+                   (unsigned long long)g_bzbx_mod_size);
+        vfs_mount_from_cpio((const void*)g_bzbx_mod_start, (unsigned long)g_bzbx_mod_size);
+        fs_set_current(vfs_get_interface());
     }
+    else { kprintf("Failed to mount busybox module; kernel unable to start"); for (;;); }
 
-    // Если сюда дошли — запускаем сразу шелл (busybox applet)
-    PrintfQEMU("Loading /bin/busybox fallback...\n");
-    {
-        // Используем форму "busybox sh -i", чтобы applet определялся надёжно и был интерактивным
-        const char* argv_fallback[] = { "busybox", "sh", "-i", nullptr };
-        (void)kexecve("/bin/busybox", argv_fallback);
-    }
+    kprintf("\nSolar kernel v.0.10.0 (demo) without init script\n");
+    // Запускаем начальный шелл
+    const char* argv_fallback[] = { "busybox", "sh", "-i", nullptr };
+    (void)kexecve("/bin/busybox", argv_fallback);
 
     
 
-    for(;;) { asm volatile("hlt"); }
+    // Если пользовательский процесс завершился/упал, попытаться перезапустить шелл
+    for(;;) {
+        thread_t* u = thread_get_current_user();
+        if (!u) {
+            const char* argv2[] = { "busybox", "sh", "-i", nullptr };
+            kprintf("User task ended. Restarting shell...\n");
+            (void)kexecve("/bin/busybox", argv2);
+        }
+        asm volatile("hlt");
+    }
 } 

@@ -3,11 +3,12 @@
 #include <pic.h>
 #include <idt.h>
 #include <thread.h>
+#include <vga.h>
 #include <spinlock.h>
 #include <stdint.h>
 #include <string.h>
-#include <vbetty.h>
-#include <vbedbuff.h>
+#include <vga.h>
+#include <vga.h>
 
 // Размер буфера клавиатуры
 #define KEYBOARD_BUFFER_SIZE 256
@@ -221,10 +222,9 @@ char* kgets(char* buffer, int max_length) {
     int cursor_pos = 0;
     memset(buffer, 0, max_length);
 
-    int start_x = vbetty_get_cursor_x();
-    int start_y = vbetty_get_cursor_y();
+    uint32_t start_x = 0, start_y = 0; vga_get_cursor(&start_x, &start_y);
     
-    vbetty_force_draw_cursor();
+    vga_set_cursor(start_x, start_y);
     
     while (1) {
         char c = kgetc();
@@ -237,14 +237,14 @@ char* kgets(char* buffer, int max_length) {
         }
         
         if (c == '\n') {
-            vbetty_force_hide_cursor();
+            // VGA hw cursor: nothing to erase; we'll rewrite line
             buffer[buffer_pos] = '\0';
-            vbetty_print("\n");
+            kprintf("\n");
             return buffer;
         }
         
         // Скрываем курсор перед любым изменением
-        vbetty_force_hide_cursor();
+        // VGA hw cursor: nothing to erase
         
         if ((c == '\b' || c == 127) && cursor_pos > 0) {
             // Backspace
@@ -278,20 +278,19 @@ char* kgets(char* buffer, int max_length) {
         
         // Всегда перерисовываем всю строку заново
         // 1. Очищаем всю строку от промпта до конца
-        vbetty_set_cursor_pos(start_x, start_y);
+        vga_set_cursor(start_x, start_y);
         for (int i = 0; i < buffer_pos + 10; i++) { // Очищаем с запасом
-            vbetty_put_char(' ');
+        kprintf(" ");
         }
         
         // 2. Перерисовываем строку с начала
-        vbetty_set_cursor_pos(start_x, start_y);
+        vga_set_cursor(start_x, start_y);
         for (int i = 0; i < buffer_pos; i++) {
-            vbetty_put_char(buffer[i]);
+            kprintf("%c", buffer[i]);
         }
         
         // 3. Устанавливаем курсор в правильную позицию
-        vbetty_set_cursor_pos(start_x + cursor_pos, start_y);
-        vbetty_force_draw_cursor();
+        vga_set_cursor(start_x + (uint32_t)cursor_pos, start_y);
     }
     
     return buffer;

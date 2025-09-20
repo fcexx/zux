@@ -1,6 +1,6 @@
 #include <syscall.h>
 #include <thread.h>
-#include <vbetty.h>
+#include <vga.h>
 #include <debug.h>
 #include <fs_interface.h>
 #include <gdt.h>
@@ -261,9 +261,9 @@ static long sys_write(int fd, const char* buf, unsigned long len){
     if (fd == 1 || fd == 2 || is_tty_fd(fd)) {
         if (!buf || len == 0) return 0;
         auto put_tty_char = [](char c){
-            if (c == '\r') { int y = vbetty_get_cursor_y(); vbetty_set_cursor_pos(0, y); return; }
-            if (c == '\b' || c == 127) { int x=vbetty_get_cursor_x(); int y=vbetty_get_cursor_y(); if (x>0) vbetty_set_cursor_pos(x-1,y); return; }
-            vbetty_put_char(c);
+            if (c == '\r') { uint32_t x=0,y=0; vga_get_cursor(&x,&y); vga_set_cursor(0, y); return; }
+            if (c == '\b' || c == 127) { uint32_t x=0,y=0; vga_get_cursor(&x,&y); if (x>0) vga_set_cursor(x-1,y); return; }
+            kprintf("%c", c);
         };
         // Диагностика для fd==1: краткий предпросмотр и счётчик повторов
         if (fd == 1) {
@@ -384,23 +384,78 @@ static long sys_open(const char* path, int flags){
 }
 
 static long sys_read(int fd, void* buf, unsigned long len){
-    //PrintfQEMU("[read] fd=%d buf=0x%llx len=%llu\n", fd, (unsigned long long)(uint64_t)buf, (unsigned long long)len);
-    // stdin or /dev/tty from keyboard buffer
+    // Линейное редактирование для TTY: backspace и стрелки
     if ((fd == 0 || is_tty_fd(fd)) && buf && len > 0) {
-        unsigned long i = 0;
+        // Коды специальных клавиш из клавиатурного драйвера
+        const char KEY_UP     = (char)0x80;
+        const char KEY_DOWN   = (char)0x81;
+        const char KEY_LEFT   = (char)0x82;
+        const char KEY_RIGHT  = (char)0x83;
+        const char KEY_HOME   = (char)0x84;
+        const char KEY_END    = (char)0x85;
+        const char KEY_DELETE = (char)0x89;
+
+        char line[512];
+        int line_len = 0;
+        int cursor = 0;
+        memset(line, 0, sizeof(line));
+
+        uint32_t start_x = 0, start_y = 0; vga_get_cursor(&start_x, &start_y);
+
         for (;;) {
-            if (kgetc_available() == 0) {
-                if (i > 0) return (long)i; // частичное чтение
-                // Разрешим прерывания и подождём IRQ, чтобы клавиатура/PIT могли сработать
-                asm volatile("sti; hlt");
-                continue;
-            }
+            if (kgetc_available() == 0) { asm volatile("sti; hlt"); continue; }
             char c = kgetc();
-            reinterpret_cast<char*>(buf)[i++] = c;
-            // Возврат по достижению лимита или по переводу строки
-            kprintf("%c", c);
-            if (i >= len || c == '\n') return (long)i;
-            if (kgetc_available() == 0) return (long)i; // отдаём то, что есть
+
+            // Ctrl+C (ETX)
+            if (c == 3) { kprintf("^C\n"); return 0; }
+
+            if (c == '\n' || c == '\r') {
+                // Завершаем строку
+                kprintf("\n");
+                // Копируем в пользовательский буфер (включая перевод строки)
+                unsigned long to_copy = (unsigned long)((line_len < (int)(len-1)) ? line_len : (int)(len-1));
+                if (to_copy) memcpy(buf, line, to_copy);
+                ((char*)buf)[to_copy] = '\n';
+                return (long)(to_copy + 1);
+            }
+
+            if (c == '\b' || (unsigned char)c == 127) {
+                if (cursor > 0) {
+                    // Сдвигаем влево, удаляя символ перед курсором
+                    for (int i = cursor - 1; i < line_len - 1; i++) line[i] = line[i + 1];
+                    line_len--; cursor--;
+                }
+            } else if (c == KEY_LEFT) {
+                if (cursor > 0) cursor--;
+            } else if (c == KEY_RIGHT) {
+                if (cursor < line_len) cursor++;
+            } else if (c == KEY_HOME) {
+                cursor = 0;
+            } else if (c == KEY_END) {
+                cursor = line_len;
+            } else if (c == KEY_DELETE) {
+                if (cursor < line_len) {
+                    for (int i = cursor; i < line_len - 1; i++) line[i] = line[i + 1];
+                    line_len--;
+                }
+            } else if ((unsigned char)c >= 32 && (unsigned char)c < 127) {
+                if (line_len < (int)sizeof(line) - 1) {
+                    // Вставка в позицию курсора
+                    for (int i = line_len; i > cursor; i--) line[i] = line[i - 1];
+                    line[cursor] = c; line_len++; cursor++;
+                }
+            } else {
+                // Прочие — игнор
+            }
+
+            // Перерисовка строки
+            vga_set_cursor(start_x, start_y);
+            // Очистим хвост (прошлая длина могла быть больше). Выведем line_len символов и с запасом пробелы
+            for (int i = 0; i < line_len; i++) kprintf("%c", line[i]);
+            // Стереть остаток до конца прошлого содержимого: дадим небольшой запас
+            kprintf("          ");
+            // Вернуть курсор в позицию
+            vga_set_cursor(start_x + (uint32_t)cursor, start_y);
         }
     }
     thread_t* t = active_thread();
@@ -987,10 +1042,31 @@ extern "C" uint64_t sys_execve(const char* path, const char* const* argv, const 
         sp -= 8ULL;
     }
 
-    exec_new_rip = entry;
-    exec_new_rsp = sp;
-    exec_trampoline = 1;
-    return 0;
+    // Запускаем как ОТДЕЛЬНЫЙ процесс: создаём kernel-thread, который перейдёт в user-mode
+    struct spawn_user_args { uint64_t entry; uint64_t rsp; char name[32]; };
+    spawn_user_args* a = (spawn_user_args*)kmalloc(sizeof(spawn_user_args));
+    if (!a) return (uint64_t)-12; // -ENOMEM
+    a->entry = entry; a->rsp = sp; memset(a->name, 0, sizeof(a->name));
+    // имя из последнего компонента path
+    const char* base = kpath; for (const char* p = kpath; p && *p; ++p) if (*p=='/') base = p+1; 
+    strncpy(a->name, base && *base ? base : "user", sizeof(a->name)-1);
+
+    // Передадим аргументы через глобальный слот
+    static spawn_user_args* g_pending_spawn = nullptr;
+    extern void enter_user_mode(uint64_t user_entry, uint64_t user_stack_top);
+    auto spawn_entry = [](){
+        spawn_user_args* pa = g_pending_spawn; g_pending_spawn = nullptr;
+        if (!pa) return; // nothing
+        // Зарегистрируем процесс и перейдём в ring3
+        thread_register_user(pa->entry, pa->rsp, pa->name);
+        asm volatile("sti");
+        enter_user_mode(pa->entry, pa->rsp);
+    };
+    g_pending_spawn = a;
+    thread_t* kt = thread_create((void(*)())spawn_entry, a->name);
+    if (!kt) { g_pending_spawn = nullptr; kfree(a); return (uint64_t)-12; }
+    // Возвращаем PID созданного процесса (ид потока)
+    return (uint64_t)kt->tid;
 }
 
 // arch_prctl for x86_64: support ARCH_SET_FS (0x1002) and ARCH_GET_FS (0x1003)
@@ -1039,14 +1115,7 @@ static long sys_arch_prctl(long code, uint64_t addr){
     return -38; // -ENOSYS for others
 }
 
-static long sys_set_tid_address(uint64_t tidptr){
-    // thread_t* t = thread_current();
-    // if (t) {
-    //     t->clear_child_tid = tidptr;
-    //     return (long)t->tid;
-    // }
-    return 1;
-}
+static long sys_set_tid_address(uint64_t tidptr){ (void)tidptr; return 1; }
 
 static long sys_futex(uint64_t /*uaddr*/, int /*op*/, uint64_t /*val*/, uint64_t /*timeout*/, uint64_t /*uaddr2*/, uint64_t /*val3*/){
     // Однопоточный заглушечный вариант: «все ок»

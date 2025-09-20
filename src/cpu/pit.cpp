@@ -2,8 +2,7 @@
 #include <debug.h>
 #include <pic.h>
 #include <idt.h>
-#include <vbedbuff.h>
-#include <vbetty.h>
+// VGA text mode uses hardware cursor; no backbuffer swap needed
 #include <thread.h>
 
 // Global variables
@@ -13,20 +12,8 @@ volatile uint32_t pit_frequency = 1000; // Default 100 Hz
 // PIT handler - called on IRQ 0
 void pit_handler(cpu_registers_t* regs) {
     pit_ticks++;
-    
-
-    if (pit_ticks % 50 == 0) { // More frequent updates for better responsiveness
-        if (vbedbuff_is_initialized()) {
-            vbedbuff_swap();
-        }
-    }
-
-    // Убираем обновление курсора из таймера - курсор должен гореть постоянно
-    if (pit_ticks % 250 == 0) {
-        if (vbedbuff_is_initialized()) {
-            vbetty_update_cursor();
-        }
-    }
+    (void)regs;
+    // VGA: аппаратный курсор, свопов нет
     
     // Вызываем планировщик реже - каждые 10 тиков (10 мс при 1000 Гц)
     if (init && (pit_ticks % 10 == 0)) {

@@ -32,40 +32,7 @@ extern "C" {
     void isr_dispatch(cpu_registers_t* regs);
 }
 
-static const char* exception_messages[] = {
-    "Division By Zero",
-    "Debug",
-    "Non Maskable Interrupt",
-    "Breakpoint",
-    "Into Detected Overflow",
-    "Out of Bounds",
-    "Invalid Opcode",
-    "No Coprocessor",
-    "Double fault",
-    "Coprocessor Segment Overrun",
-    "Bad TSS",
-    "Segment not present",
-    "Stack fault",
-    "General protection fault",
-    "Page fault",
-    "Unknown Interrupt",
-    "Coprocessor Fault",
-    "Alignment Fault",
-    "Machine Check", 
-    "Reserved",
-    "Reserved",
-    "Reserved",
-    "Reserved",
-    "Reserved",
-    "Reserved",
-    "Reserved",
-    "Reserved",
-    "Reserved",
-    "Reserved",
-    "Reserved",
-    "Reserved",
-    "Reserved"
-};
+extern const char* exception_messages[];
 
 void idt_init();
 void idt_set_gate(uint8_t num, uint64_t handler, uint16_t selector, uint8_t flags);
