@@ -8,6 +8,8 @@
 .extern exec_child_rax
 .extern syscall_saved_user_rsp
 .extern syscall_saved_user_rcx
+.extern dbg_saved_rbx_in
+.extern dbg_saved_rbx_out
 
 // On entry (64-bit):
 //  RAX=nr, RDI,RSI,RDX,R10,R8,R9=args; RCX=user RIP; R11=user RFLAGS; RSP=user stack
@@ -23,6 +25,7 @@ syscall_entry:
     // Save callee-saved registers (preserve user RBX,RBP,R12..R15 across syscall)
     push rbp
     push rbx
+    mov qword ptr [rip + dbg_saved_rbx_in], rbx
     push r12
     push r13
     push r14
@@ -62,6 +65,9 @@ syscall_entry:
     pop r14
     pop r13
     pop r12
+    // Before restoring callee-saved, record the saved RBX value from the stack for diagnostics
+    mov rax, qword ptr [rsp + 32]
+    mov qword ptr [rip + dbg_saved_rbx_out], rax
     pop rbx
     pop rbp
     // Build IRET frame and return to new user entry/stack
@@ -101,6 +107,9 @@ syscall_entry:
     pop r14
     pop r13
     pop r12
+    // Before restoring callee-saved, record the saved RBX value from the stack for diagnostics
+    mov rax, qword ptr [rsp + 32]
+    mov qword ptr [rip + dbg_saved_rbx_out], rax
     pop rbx
     pop rbp
     // Build IRET frame last: SS,RSP,RFLAGS,CS,RIP (use saved globals)

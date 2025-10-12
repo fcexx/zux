@@ -13,6 +13,8 @@ struct VfsNode {
     VfsNode* parent;
     VfsNode* children; // singly-linked list
     VfsNode* next;
+    uint8_t is_symlink; // 1 if symlink
+    char link_target[256]; // symlink destination (NUL-terminated)
 };
 
 struct VfsFilePriv { VfsNode* node; uint64_t pos; };
@@ -50,7 +52,14 @@ static VfsNode* vfs_lookup_path(const char* path){
         VfsNode* ch = cur->children;
         while (ch && strncmp(ch->name, seg, 256)!=0) ch=ch->next;
         if (!ch) return nullptr;
-        cur = ch;
+        // follow absolute symlinks immediately
+        if (ch->is_symlink && ch->link_target[0] == '/'){
+            VfsNode* target = vfs_lookup_path(ch->link_target);
+            if (!target) return nullptr;
+            cur = target;
+        } else {
+            cur = ch;
+        }
         if (*path=='/') path++;
     }
     return cur;
@@ -60,6 +69,8 @@ static VfsNode* vfs_lookup_path(const char* path){
 static unsigned long from_hex(const char* s, int n){ unsigned long v=0; for(int i=0;i<n;i++){ char c=s[i]; v<<=4; if(c>='0'&&c<='9') v|=c-'0'; else if(c>='a'&&c<='f') v|=10+c-'a'; else if(c>='A'&&c<='F') v|=10+c-'A'; } return v; }
 
 static uint32_t align4(uint32_t x){ return (x+3)&~3u; }
+// throttle verbose VFS logging to avoid console flood during large cpio mounts
+static int vfs_verbose_counter = 0;
 
 int vfs_mount_from_cpio(const void* data, unsigned long size){
     vfs_root = (VfsNode*)kmalloc(sizeof(VfsNode));
@@ -87,8 +98,11 @@ int vfs_mount_from_cpio(const void* data, unsigned long size){
         const uint8_t* hdrStart = p;
         p += 110;
         const char* name = (const char*)p;
-        PrintfQEMU("[vfs] hdr@+%lu namesz=%lu filesz=%lu mode=%08lx name='%s'\n",
-                   (unsigned long)(hdrStart - p0), namesz, filesz, mode, name);
+        // Throttled header log: print every 128 entries or when file is large
+        if ((vfs_verbose_counter++ & 127) == 0 || filesz > 0x100000ULL) {
+            PrintfQEMU("[vfs] hdr@+%lu namesz=%lu filesz=%lu mode=%08lx name='%s'\n",
+                       (unsigned long)(hdrStart - p0), namesz, filesz, mode, name);
+        }
         // move past name (including trailing NUL), then align p to 4 bytes
         p += namesz;
         p = (const uint8_t*)(((size_t)p + 3u) & ~(size_t)3u);
@@ -98,8 +112,9 @@ int vfs_mount_from_cpio(const void* data, unsigned long size){
         while (pathbuf[0]=='.' && pathbuf[1]=='/') memmove(pathbuf, pathbuf+2, strlen(pathbuf+2)+1);
         while (pathbuf[0]=='/') memmove(pathbuf, pathbuf+1, strlen(pathbuf+1)+1);
         if (pathbuf[0]=='\0') { p += align4((uint32_t)filesz); continue; }
-        // detect directory by c_mode (newc): S_IFMT=0170000, S_IFDIR=0040000
+        // detect types by c_mode (newc): S_IFMT=0170000, S_IFDIR=0040000, S_IFLNK=0120000
         bool is_dir = ((mode & 0170000) == 0040000);
+        bool is_lnk = ((mode & 0170000) == 0120000);
         // strip trailing '/' only if present
         size_t plen = strlen(pathbuf);
         if (plen > 0 && pathbuf[plen-1] == '/') pathbuf[plen-1] = '\0';
@@ -116,8 +131,55 @@ int vfs_mount_from_cpio(const void* data, unsigned long size){
                 // final component under 'cur'
                 VfsNode* exist = cur->children; while (exist && strcmp(exist->name, s)!=0) exist=exist->next;
                 if (!exist) exist = vfs_make_child(cur, s, is_dir);
-                if (!is_dir && filesz){ exist->size = filesz; exist->data = (uint8_t*)kmalloc(filesz); memcpy(exist->data, p, filesz); }
-                PrintfQEMU("[vfs] add %s %s size=%lu\n", pathbuf, is_dir?"dir":"file", filesz);
+                if (!is_dir){
+                    if (is_lnk){
+                        exist->is_symlink = 1;
+                        size_t tlen = (filesz < sizeof(exist->link_target)-1) ? (size_t)filesz : sizeof(exist->link_target)-1;
+                        memset(exist->link_target, 0, sizeof(exist->link_target));
+                        if (tlen) memcpy(exist->link_target, p, tlen);
+                        // strip any trailing NULs/newlines
+                        size_t L = strlen(exist->link_target);
+                        while (L && (exist->link_target[L-1]=='\n' || exist->link_target[L-1]=='\0' || exist->link_target[L-1]=='\r')) { exist->link_target[L-1]=0; L--; }
+                        // Throttle symlink logs to avoid flooding
+                        if ((vfs_verbose_counter & 127) == 0 || filesz > 1024) PrintfQEMU("[vfs] symlink: path=%s target='%s' filesz=%lu\n", pathbuf, exist->link_target, filesz);
+                    } else if (filesz){
+                        // For large files, avoid copying into heap to prevent heavy allocations and potential corruption.
+                        // Instead, reference the data directly inside the cpio archive buffer (p points into 'data').
+                        const size_t NO_COPY_THRESHOLD = 64 * 1024; // 64KB
+                        PrintfQEMU("[vfs] file: path=%s filesz=%lu\n", pathbuf, filesz);
+                        exist->size = filesz;
+                        if (filesz > NO_COPY_THRESHOLD) {
+                            // Reference archive payload directly to avoid kmalloc+memcpy
+                            exist->data = (uint8_t*)p; // p remains valid while archive is mounted
+                            PrintfQEMU("[vfs] file: using direct archive reference for %s (size=%lu)\n", pathbuf, filesz);
+                        } else {
+                            exist->data = (uint8_t*)kmalloc(filesz);
+                            if (!exist->data) {
+                                PrintfQEMU("[vfs] kmalloc failed for %s size=%lu\n", pathbuf, filesz);
+                                exist->data = (uint8_t*)p; // fallback to direct reference
+                                exist->size = (size_t)filesz;
+                            } else {
+                                // Ensure source pointer is within archive bounds before memcpy
+                                if ((const uint8_t*)p + filesz <= end) {
+                                    memcpy(exist->data, p, filesz);
+                                } else {
+                                    PrintfQEMU("[vfs] WARNING: cpio entry truncated for %s (filesz=%lu, available=%lu)\n",
+                                               pathbuf, filesz, (unsigned long)(end - (const uint8_t*)p));
+                                    size_t avail = (size_t)(end - (const uint8_t*)p);
+                                    memcpy(exist->data, p, avail);
+                                    exist->size = avail;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (filesz > 0x100000ULL) {
+                    // Large file - always log
+                    PrintfQEMU("[vfs] add %s %s size=%lu\n", pathbuf, is_dir?"dir":"file", filesz);
+                } else {
+                    // Throttled add log
+                    if ((vfs_verbose_counter & 127) == 0) PrintfQEMU("[vfs] add %s %s size=%lu\n", pathbuf, is_dir?"dir":"file", filesz);
+                }
                 break;
             } else {
                 *slash='\0';
@@ -130,6 +192,12 @@ int vfs_mount_from_cpio(const void* data, unsigned long size){
         // move past file data then align to 4 bytes
         p += filesz;
         p = (const uint8_t*)(((size_t)p + 3u) & ~(size_t)3u);
+        // Yield occasionally to avoid long blocking mount (gives other threads a chance)
+        if ((vfs_verbose_counter & 127) == 0) {
+            // Yield to scheduler if available
+            extern void thread_yield();
+            thread_yield();
+        }
     }
     PrintfQEMU("[vfs] mounted cpio with root=%p\n", (void*)vfs_root);
     return 0;
@@ -167,3 +235,4 @@ static fs_interface_t vfs_if = {
 };
 
 extern "C" fs_interface_t* vfs_get_interface(){ return &vfs_if; } 
+extern "C" const char* vfs_readlink_target(const char* path){ VfsNode* n = vfs_lookup_path(path); if (!n || !n->is_symlink) return nullptr; return n->link_target; }

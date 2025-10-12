@@ -27,21 +27,21 @@ OBJECTS = $(ASM_OBJECTS) $(GAS_OBJECTS) $(C_OBJECTS) $(LIBC_OBJECTS)
 
 .PHONY: all clean run
 
-all: $(BINDIR)/solarImg solar.iso
+all: $(BINDIR)/entixImg entix.iso
 
-$(BINDIR)/solarImg: $(OBJECTS)
+$(BINDIR)/entixImg: $(OBJECTS)
 	@mkdir -p $(dir $@)
 	@echo Linking...
 	@$(LD) -n -o $@ -T linker.ld $(OBJECTS)
 
-hda/boot/solarImg: $(BINDIR)/solarImg
+hda/boot/entixImg: $(BINDIR)/entixImg
 	@mkdir -p $(dir $@)
 	@cp $< $@
 
-solar.iso: hda/boot/solarImg hda/boot/grub/grub.cfg
+entix.iso: hda/boot/entixImg hda/boot/grub/grub.cfg
 	@echo "Creating bootable ISO: $@"
 	@mkdir -p $(BUILDDIR)/isodir/boot/grub
-	@cp hda/boot/solarImg $(BUILDDIR)/isodir/boot/solarImg
+	@cp hda/boot/entixImg $(BUILDDIR)/isodir/boot/entixImg
 	@-cp hda/boot/bzbx $(BUILDDIR)/isodir/boot/bzbx
 	@cp hda/boot/grub/grub.cfg $(BUILDDIR)/isodir/boot/grub/grub.cfg
 	@grub-mkrescue -o $@ $(BUILDDIR)/isodir
@@ -67,13 +67,13 @@ $(OBJDIR)/%.o: libc/%.cpp
 	@$(CC) -c $< -o $@ -std=c++17 -ffreestanding -fno-exceptions -fno-rtti -Wall -Wextra -g -Iinclude -w
 
 clean:
-	sudo rm -rf $(BUILDDIR) solar.iso
+	sudo rm -rf $(BUILDDIR) entix.iso
 
 run:
-	@qemu-system-x86_64 -cdrom solar.iso -m 512M -debugcon stdio
+	@qemu-system-x86_64 -cdrom entix.iso -m 256M -debugcon stdio -hda ../hda.img -boot d
 
 debug:
-	qemu-system-x86_64 -cdrom solar.iso -m 512M -s -S -debugcon stdio
+	qemu-system-x86_64 -cdrom entix.iso -m 512M -s -S -debugcon stdio
 
 vmdk:
 	@echo "Not supported for ISO build"

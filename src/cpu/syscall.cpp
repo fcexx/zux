@@ -11,6 +11,7 @@
 #include <heap.h>
 #include <elf.h>
 #include <stddef.h>
+#include <stdio.h>
 
 extern "C" { uint64_t syscall_kernel_rsp0 = 0; } // обновляется в tss_set_rsp0
 extern "C" void syscall_entry();             // из assembly
@@ -18,6 +19,7 @@ extern "C" uint64_t exec_new_rip = 0;        // для trampolining из asm
 extern "C" uint64_t exec_new_rsp = 0;        // для trampolining из asm
 extern "C" volatile uint64_t exec_trampoline = 0; // флаг для asm: выполнять trampolining
 extern "C" uint64_t exec_child_rax = 0;      // значение RAX в ребёнке после trampolining
+extern "C" const char* vfs_readlink_target(const char*); // из vfs.cpp
 extern "C" uint64_t syscall_saved_user_rsp = 0; // сохраняется в asm на входе SYSCALL
 extern "C" uint64_t syscall_saved_user_rcx = 0; // сохраняется в asm на входе SYSCALL
 
@@ -84,6 +86,8 @@ static long sys_prlimit64(int /*pid*/, int /*resource*/, const void* /*new_limit
 static long sys_set_robust_list(void* /*head*/, size_t /*len*/);
 static long sys_prctl(long /*option*/, unsigned long /*arg2*/, unsigned long /*arg3*/, unsigned long /*arg4*/, unsigned long /*arg5*/);
 static long sys_faccessat(int dirfd, const char* path, int mode, int /*flags*/);
+static long sys_dup2(int oldfd, int newfd);
+static long sys_clone(uint64_t flags, uint64_t child_stack, uint64_t parent_tidptr, uint64_t tls, uint64_t child_tidptr);
 
 
 // console I/O helpers and tty constants
@@ -123,6 +127,9 @@ static inline uint64_t read_msr(uint32_t msr){
     return ((uint64_t)hi << 32) | lo;
 }
 
+extern "C" uint64_t dbg_saved_rbx_in = 0;
+extern "C" uint64_t dbg_saved_rbx_out = 0;
+
 extern "C" uint64_t syscall_entry_c(SyscallFrame* f){
     uint64_t nr = f->nr;
     uint64_t nr_raw = nr;
@@ -131,6 +138,7 @@ extern "C" uint64_t syscall_entry_c(SyscallFrame* f){
     if ((nr & 0xFFF00000ull) == 0x00200000ull) nr &= 0x000FFFFFull;
     // Поддержка Linux x32 ABI: системные вызовы пронумерованы "базовый+512"
     if (nr >= 512 && nr < 1024) nr -= 512;
+    PrintfQEMU("[syscall]: %d\n", nr);
     //PrintfQEMU("syscall num: %u\n", nr);
     switch (nr) {
         case 58: /* vfork */ return (uint64_t)sys_vfork();
@@ -158,7 +166,9 @@ extern "C" uint64_t syscall_entry_c(SyscallFrame* f){
         case 28: /* madvise */ return (uint64_t)sys_madvise(f->a1, f->a2, (int)f->a3);
         case 25: /* mremap */ return (uint64_t)sys_mremap_impl(f->a1, f->a2, f->a3, f->a4, f->a5);
         case 35: /* nanosleep */ return (uint64_t)sys_nanosleep((const void*)f->a1, (void*)f->a2);
+        case 33: /* dup2 */ return (uint64_t)sys_dup2((int)f->a1, (int)f->a2);
         case 39: /* getpid */ return (uint64_t)sys_getpid();
+        case 56: /* clone */ return (uint64_t)sys_clone(f->a1, f->a2, f->a3, f->a4, f->a5);
         case 59: /* execve */ return (uint64_t)sys_execve((const char*)f->a1, (const char* const*)f->a2, (const char* const*)f->a3);
         case 60: /* exit   */ sys_exit((int)f->a1); return 0;
         case 63: /* uname  */ return (uint64_t)sys_uname((void*)f->a1);
@@ -383,10 +393,184 @@ static long sys_open(const char* path, int flags){
     return fd;
 }
 
+// Функция автодополнения команд для syscall
+static char* autocomplete_command_syscall(const char* partial) {
+    if (!partial) return nullptr;
+    size_t plen = strlen(partial);
+
+    // Список команд (быстрый lookup) — неполный, но достаточный
+    static const char* commands[] = {
+        "busybox","ls","cat","echo","pwd","hostname","uname","date","whoami",
+        "ps","kill","mount","umount","df","du","free","uptime","w","who",
+        "grep","sed","awk","sort","uniq","head","tail","less","more",
+        "cp","mv","rm","mkdir","rmdir","ln","chmod","chown","touch",
+        "tar","gzip","gunzip","zip","unzip","find","which","whereis",
+        "ping","telnet","nc","wget","curl","ftp","ssh","scp",
+        "vi","nano","ed","hexdump","xxd","od","strings","file",
+        "dd","sync","fsck","mkfs","fdisk","parted","blkid",
+        nullptr
+    };
+
+    // Если пустой ввод — покажем содержимое текущей директории (как в Linux)
+    if (plen == 0) {
+        fs_dir_t* d = fs_opendir(".");
+        if (d) {
+            fs_dirent_t ent;
+            kprintf("\n");
+            while (fs_readdir(d, &ent) == 0) {
+                kprintf("%s  ", ent.name);
+            }
+            fs_closedir(d);
+            kprintf("\n");
+        }
+        return nullptr;
+    }
+
+    // Собираме совпадения среди команд
+    const char* single_match = nullptr;
+    int match_count = 0;
+    for (int i = 0; commands[i]; i++) {
+        if (plen <= strlen(commands[i]) && strncmp(commands[i], partial, plen) == 0) {
+            if (match_count == 0) single_match = commands[i];
+            match_count++;
+        }
+    }
+
+    if (match_count == 1) {
+        char* res = (char*)kmalloc(strlen(single_match) + 1);
+        if (res) strcpy(res, single_match);
+        return res;
+    }
+
+    // Если несколько совпадений среди команд — ищем общий префикс
+    if (match_count > 1) {
+        // Найдём longest common prefix (LCP)
+        size_t lcp = plen;
+        while (1) {
+            char ch = 0; int seen = 0;
+            for (int i = 0; commands[i]; i++) {
+                if (plen > strlen(commands[i])) continue;
+                if (strncmp(commands[i], partial, plen) != 0) continue;
+                if (!seen) { ch = commands[i][lcp]; seen = 1; }
+                else { if (commands[i][lcp] != ch) { seen = 2; break; } }
+            }
+            if (seen == 1 && ch != '\0') { lcp++; continue; }
+            break;
+        }
+        if (lcp > plen) {
+            // Вернём расширенную часть (LCP)
+            // Найдём любой матч для получения полного префикса
+            const char* any = nullptr;
+            for (int i = 0; commands[i]; i++) if (plen <= strlen(commands[i]) && strncmp(commands[i], partial, plen) == 0) { any = commands[i]; break; }
+            if (any) {
+                char* res = (char*)kmalloc(lcp + 1);
+                if (res) { strncpy(res, any, lcp); res[lcp] = '\0'; return res; }
+            }
+        }
+        // Если LCP == partial, покажем варианты пользователю
+        kprintf("\n");
+        for (int i = 0; commands[i]; i++) {
+            if (plen <= strlen(commands[i]) && strncmp(commands[i], partial, plen) == 0) kprintf("%s  ", commands[i]);
+        }
+        kprintf("\n");
+        return nullptr;
+    }
+
+    // Попробуем автодополнение по файлам/директориям (VFS)
+    // Разделим partial на путь + префикс
+    const char* slash = strrchr(partial, '/');
+    char dirpath[256]; char filepref[256];
+    if (slash) {
+        size_t dlen = slash - partial;
+        if (dlen == 0) strcpy(dirpath, "/"); else { strncpy(dirpath, partial, dlen); dirpath[dlen] = '\0'; }
+        strncpy(filepref, slash + 1, sizeof(filepref)-1); filepref[sizeof(filepref)-1] = '\0';
+    } else {
+        strcpy(dirpath, "."); strncpy(filepref, partial, sizeof(filepref)-1); filepref[sizeof(filepref)-1] = '\0';
+    }
+
+    fs_dir_t* d = fs_opendir(dirpath);
+    if (!d) return nullptr;
+    fs_dirent_t ent;
+    const char* first_match = nullptr; int fcount = 0;
+    // buffer for lcp
+    char lcpbuf[256]; memset(lcpbuf,0,sizeof(lcpbuf));
+    while (fs_readdir(d, &ent) == 0) {
+            if (strncmp(ent.name, filepref, strlen(filepref)) == 0) {
+            fcount++;
+            if (!first_match) {
+                // allocate and copy name
+                size_t nl = strlen(ent.name) + 1;
+                char* tmp = (char*)kmalloc(nl);
+                if (tmp) strcpy(tmp, ent.name);
+                first_match = tmp;
+            }
+            if (fcount == 1) strncpy(lcpbuf, ent.name, sizeof(lcpbuf)-1);
+            else {
+                // reduce lcpbuf
+                size_t j = 0; while (lcpbuf[j] && ent.name[j] && lcpbuf[j] == ent.name[j]) j++; lcpbuf[j] = '\0';
+            }
+        }
+    }
+    fs_closedir(d);
+
+    if (fcount == 0) return nullptr;
+    if (fcount == 1) {
+        // return dirpath + '/' + first_match (or just first_match if dirpath==.)
+        char out[512];
+        if (strcmp(dirpath, ".") == 0) {
+            strncpy(out, first_match, sizeof(out)-1); out[sizeof(out)-1] = '\0';
+        } else {
+            size_t dlen = strlen(dirpath);
+            size_t flen = strlen(first_match);
+            if (dlen + 1 + flen + 1 <= sizeof(out)) {
+                strcpy(out, dirpath);
+                strcat(out, "/");
+                strcat(out, first_match);
+            } else {
+                // fallback: just copy dirpath (truncated)
+                strncpy(out, dirpath, sizeof(out)-1); out[sizeof(out)-1] = '\0';
+            }
+        }
+        char* res = (char*)kmalloc(strlen(out) + 1); if (res) strcpy(res, out);
+        if (first_match) kfree((void*)first_match);
+        return res;
+    }
+    // несколько совпадений — если общий префикс длиннее filepref, вернуть его
+    if (strlen(lcpbuf) > strlen(filepref)) {
+        char out[512];
+        if (strcmp(dirpath, ".") == 0) {
+            strncpy(out, lcpbuf, sizeof(out)-1); out[sizeof(out)-1] = '\0';
+        } else {
+            size_t dlen = strlen(dirpath);
+            size_t flen = strlen(lcpbuf);
+            if (dlen + 1 + flen + 1 <= sizeof(out)) {
+                strcpy(out, dirpath);
+                strcat(out, "/");
+                strcat(out, lcpbuf);
+            } else {
+                strncpy(out, dirpath, sizeof(out)-1); out[sizeof(out)-1] = '\0';
+            }
+        }
+        char* res = (char*)kmalloc(strlen(out) + 1); if (res) strcpy(res, out);
+        if (first_match) kfree((void*)first_match);
+        return res;
+    }
+
+    // Иначе — выведем список совпадений
+    kprintf("\n");
+    d = fs_opendir(dirpath);
+    if (d) {
+        while (fs_readdir(d, &ent) == 0) if (strncmp(ent.name, filepref, strlen(filepref)) == 0) kprintf("%s  ", ent.name);
+        fs_closedir(d);
+    }
+    kprintf("\n");
+    if (first_match) kfree((void*)first_match);
+    return nullptr;
+}
+
 static long sys_read(int fd, void* buf, unsigned long len){
     // Линейное редактирование для TTY: backspace и стрелки
     if ((fd == 0 || is_tty_fd(fd)) && buf && len > 0) {
-        // Коды специальных клавиш из клавиатурного драйвера
         const char KEY_UP     = (char)0x80;
         const char KEY_DOWN   = (char)0x81;
         const char KEY_LEFT   = (char)0x82;
@@ -394,6 +578,7 @@ static long sys_read(int fd, void* buf, unsigned long len){
         const char KEY_HOME   = (char)0x84;
         const char KEY_END    = (char)0x85;
         const char KEY_DELETE = (char)0x89;
+        const char KEY_TAB    = (char)0x8A;
 
         char line[512];
         int line_len = 0;
@@ -406,13 +591,10 @@ static long sys_read(int fd, void* buf, unsigned long len){
             if (kgetc_available() == 0) { asm volatile("sti; hlt"); continue; }
             char c = kgetc();
 
-            // Ctrl+C (ETX)
             if (c == 3) { kprintf("^C\n"); return 0; }
 
             if (c == '\n' || c == '\r') {
-                // Завершаем строку
                 kprintf("\n");
-                // Копируем в пользовательский буфер (включая перевод строки)
                 unsigned long to_copy = (unsigned long)((line_len < (int)(len-1)) ? line_len : (int)(len-1));
                 if (to_copy) memcpy(buf, line, to_copy);
                 ((char*)buf)[to_copy] = '\n';
@@ -420,41 +602,34 @@ static long sys_read(int fd, void* buf, unsigned long len){
             }
 
             if (c == '\b' || (unsigned char)c == 127) {
-                if (cursor > 0) {
-                    // Сдвигаем влево, удаляя символ перед курсором
-                    for (int i = cursor - 1; i < line_len - 1; i++) line[i] = line[i + 1];
-                    line_len--; cursor--;
+                if (cursor > 0) { for (int i = cursor - 1; i < line_len - 1; i++) line[i] = line[i + 1]; line_len--; cursor--; }
+            } else if (c == KEY_LEFT) { if (cursor > 0) cursor--; }
+            else if (c == KEY_RIGHT) { if (cursor < line_len) cursor++; }
+            else if (c == KEY_HOME) { cursor = 0; }
+            else if (c == KEY_END) { cursor = line_len; }
+            else if (c == KEY_DELETE) { if (cursor < line_len) { for (int i = cursor; i < line_len - 1; i++) line[i] = line[i + 1]; line_len--; } }
+            else if (c == KEY_TAB) {
+                // автодополнение
+                int word_start = cursor;
+                while (word_start > 0 && line[word_start - 1] != ' ' && line[word_start - 1] != '\t') word_start--;
+                char partial[256]; int partial_len = cursor - word_start; if (partial_len < 0) partial_len = 0; if (partial_len >= 255) partial_len = 255;
+                strncpy(partial, line + word_start, partial_len); partial[partial_len] = '\0';
+                char* completion = autocomplete_command_syscall(partial);
+                if (completion) {
+                    int completion_len = strlen(completion); int space_needed = completion_len - partial_len;
+                    if (line_len + space_needed < (int)sizeof(line) - 1) {
+                        for (int i = line_len; i >= cursor; i--) line[i + space_needed] = line[i];
+                        for (int i = 0; i < completion_len; i++) line[word_start + i] = completion[i];
+                        line_len += space_needed; cursor = word_start + completion_len;
+                    }
+                    kfree(completion);
                 }
-            } else if (c == KEY_LEFT) {
-                if (cursor > 0) cursor--;
-            } else if (c == KEY_RIGHT) {
-                if (cursor < line_len) cursor++;
-            } else if (c == KEY_HOME) {
-                cursor = 0;
-            } else if (c == KEY_END) {
-                cursor = line_len;
-            } else if (c == KEY_DELETE) {
-                if (cursor < line_len) {
-                    for (int i = cursor; i < line_len - 1; i++) line[i] = line[i + 1];
-                    line_len--;
-                }
-            } else if ((unsigned char)c >= 32 && (unsigned char)c < 127) {
-                if (line_len < (int)sizeof(line) - 1) {
-                    // Вставка в позицию курсора
-                    for (int i = line_len; i > cursor; i--) line[i] = line[i - 1];
-                    line[cursor] = c; line_len++; cursor++;
-                }
-            } else {
-                // Прочие — игнор
             }
+            else if ((unsigned char)c >= 32 && (unsigned char)c < 127) { if (line_len < (int)sizeof(line) - 1) { for (int i = line_len; i > cursor; i--) line[i] = line[i - 1]; line[cursor] = c; line_len++; cursor++; } }
 
-            // Перерисовка строки
             vga_set_cursor(start_x, start_y);
-            // Очистим хвост (прошлая длина могла быть больше). Выведем line_len символов и с запасом пробелы
             for (int i = 0; i < line_len; i++) kprintf("%c", line[i]);
-            // Стереть остаток до конца прошлого содержимого: дадим небольшой запас
-            kprintf("          ");
-            // Вернуть курсор в позицию
+            kprintf("                           ");
             vga_set_cursor(start_x + (uint32_t)cursor, start_y);
         }
     }
@@ -467,10 +642,15 @@ static long sys_close(int fd){
     thread_t* t = active_thread();
     if(fd<0 || fd>=THREAD_MAX_FD || !t->fds[fd]) return -1;
     fs_file_t* f = t->fds[fd];
-    if (is_tty_file(f)) { kfree(f); t->fds[fd]=nullptr; return 0; }
-    int r = fs_close(f);
-    t->fds[fd]=nullptr;
-    return r;
+    // Посчитаем ссылки на тот же объект в таблице
+    int refs = 0;
+    for (int i=0;i<THREAD_MAX_FD;i++) if (t->fds[i] == f) refs++;
+    // Освободим слот
+    t->fds[fd] = nullptr;
+    // Если есть другие дубликаты — не закрываем базовый объект
+    if (refs > 1) return 0;
+    if (is_tty_file(f)) { kfree(f); return 0; }
+    return fs_close(f);
 }
 
 static long sys_seek(int fd, int off, int whence){
@@ -478,6 +658,28 @@ static long sys_seek(int fd, int off, int whence){
     if(fd<0 || fd>=THREAD_MAX_FD || !t->fds[fd]) return -1;
     if (is_tty_file(t->fds[fd])) return -29; // -ESPIPE
     return fs_seek(t->fds[fd], off, whence);
+}
+
+static long sys_dup2(int oldfd, int newfd){
+    thread_t* t = active_thread();
+    if (!t) return -9; // -EBADF
+    if (oldfd < 0 || oldfd >= THREAD_MAX_FD) return -9;
+    fs_file_t* f = t->fds[oldfd];
+    if (!f) return -9;
+    if (newfd < 0 || newfd >= THREAD_MAX_FD) return -9;
+    if (oldfd == newfd) return newfd;
+    // Если newfd занят — закрываем его (корректно обработает дубликаты)
+    if (t->fds[newfd]) sys_close(newfd);
+    t->fds[newfd] = f;
+    return newfd;
+}
+
+static long sys_clone(uint64_t flags, uint64_t /*child_stack*/, uint64_t /*parent_tidptr*/, uint64_t /*tls*/, uint64_t /*child_tidptr*/){
+    // Минимальная поддержка: если запрошено разделение адресного пространства (CLONE_VM), не поддерживаем
+    const uint64_t CLONE_VM = 0x00000100ULL;
+    if (flags & CLONE_VM) return -38; // -ENOSYS (threads не поддерживаются)
+    // Без CLONE_VM ведём себя как vfork/fork: родителю вернуть pid, ребёнку 0
+    return sys_vfork();
 }
 
 static void sys_sleep(unsigned long ms){
@@ -667,11 +869,13 @@ static long sys_getppid(){
 static long sys_vfork(){
     thread_t* parent = thread_get_current_user();
     if (!parent) return -38; // -ENOSYS if no user thread
-    // Child shares address space and FDs; we reuse current thread as child context via exec trampoline
-    // Save parent pid and mark for wait
+    // Child shares address space and FDs; return into the same point after SYSCALL
+    // Use saved RCX/RSP from entry rather than stale thread->user_* fields
     int ppid = (int)parent->tid;
-    // Child will run at same RIP/RSP after return to userspace; set tramp to just deliver RAX=0
-    exec_new_rip = parent->user_rip; exec_new_rsp = parent->user_stack; exec_child_rax = 0; exec_trampoline = 1;
+    exec_new_rip = syscall_saved_user_rcx;
+    exec_new_rsp = syscall_saved_user_rsp;
+    exec_child_rax = 0;
+    exec_trampoline = 1;
     // Return child's pid to parent in RAX after iret (handled on next syscall return path)
     // For simplicity, use same pid; real fork would allocate new. Minimal hush uses vfork+execve immediately.
     return (long)ppid; // parent sees pid, child sees 0 via exec_child_rax
@@ -758,10 +962,10 @@ static long sys_uname(void* uts){
     if (!uts) return -22;
     linux_utsname* u = (linux_utsname*)uts;
     memset(u, 0, sizeof(*u));
-    strcpy(u->sysname, "Solar");
+    strcpy(u->sysname, "Entix");
     strcpy(u->nodename, "localhost");
     strcpy(u->release, "0.0");
-    strcpy(u->version, "SolarOS");
+    strcpy(u->version, "EntixOS");
     strcpy(u->machine, "x86_64");
     // domainname left empty
     return 0;
@@ -958,13 +1162,115 @@ static long sys_munmap_impl(uint64_t /*addr*/, uint64_t /*len*/){
 // madvise(2) заглушка
 static long sys_madvise(uint64_t /*addr*/, uint64_t /*len*/, int /*advice*/){ return 0; }
 
+// Функция поиска исполняемого файла по PATH с поддержкой симлинков
+static char* find_executable(const char* cmd, const char* const* envp) {
+    if (!cmd) return nullptr;
+    
+    PrintfQEMU("[find_exec] looking for cmd='%s'\n", cmd);
+    
+    // Если команда уже содержит '/', используем как есть
+    if (strchr(cmd, '/')) {
+        char* full_path = (char*)kmalloc(strlen(cmd) + 1);
+        if (!full_path) return nullptr;
+        strcpy(full_path, cmd);
+        PrintfQEMU("[find_exec] absolute path: '%s'\n", full_path);
+        return full_path;
+    }
+    
+    // Ищем PATH в переменных окружения
+    const char* path_env = nullptr;
+    if (envp) {
+        for (int i = 0; envp[i]; i++) {
+            if (strncmp(envp[i], "PATH=", 5) == 0) {
+                path_env = envp[i] + 5;
+                break;
+            }
+        }
+    }
+    
+    // Если PATH не найден, используем дефолтный
+    if (!path_env) path_env = "/bin:/usr/bin";
+    PrintfQEMU("[find_exec] PATH='%s'\n", path_env);
+    
+    // Копируем PATH для работы
+    size_t path_len = strlen(path_env);
+    char* path_copy = (char*)kmalloc(path_len + 1);
+    if (!path_copy) return nullptr;
+    strcpy(path_copy, path_env);
+    
+    // Ищем команду в каждой директории PATH
+    char* dir = strtok(path_copy, ":");
+    while (dir) {
+        // Создаём полный путь: dir/cmd
+        size_t full_len = strlen(dir) + strlen(cmd) + 2;
+        char* full_path = (char*)kmalloc(full_len);
+        if (!full_path) { kfree(path_copy); return nullptr; }
+        
+        strcpy(full_path, dir);
+        if (dir[strlen(dir)-1] != '/') strcat(full_path, "/");
+        strcat(full_path, cmd);
+        
+        PrintfQEMU("[find_exec] checking: '%s'\n", full_path);
+        
+        // Проверяем, может быть это симлинк
+        const char* link_target = vfs_readlink_target(full_path);
+        if (link_target) {
+            PrintfQEMU("[find_exec] symlink '%s' -> '%s'\n", full_path, link_target);
+            // Попробуем открыть сам путь (симлинк может указывать на реальный исполняемый файл)
+            fs_interface_t* fs = vfs_get_interface();
+            fs_file_t* f = fs->open(full_path, 0);
+            if (f) {
+                fs->close(f);
+                PrintfQEMU("[find_exec] found (symlink points to real file): '%s'\n", full_path);
+                kfree(path_copy);
+                return full_path; // Найден!
+            }
+            // Если симлинк указывает чисто на "busybox", резолвим в busybox в той же директории
+            if (strcmp(link_target, "busybox") == 0) {
+                char* busybox_path = (char*)kmalloc(strlen(dir) + 10);
+                if (busybox_path) {
+                    strcpy(busybox_path, dir);
+                    if (dir[strlen(dir)-1] != '/') strcat(busybox_path, "/");
+                    strcat(busybox_path, "busybox");
+                    
+                    fs_file_t* bb_f = fs->open(busybox_path, 0);
+                    if (bb_f) {
+                        fs->close(bb_f);
+                        PrintfQEMU("[find_exec] resolved symlink to: '%s'\n", busybox_path);
+                        kfree(full_path);
+                        kfree(path_copy);
+                        return busybox_path;
+                    }
+                    kfree(busybox_path);
+                }
+            }
+        } else {
+            // Проверяем, существует ли файл
+            fs_interface_t* fs = vfs_get_interface();
+            fs_file_t* f = fs->open(full_path, 0);
+            if (f) {
+                fs->close(f);
+                PrintfQEMU("[find_exec] found: '%s'\n", full_path);
+                kfree(path_copy);
+                return full_path; // Найден!
+            }
+        }
+        
+        kfree(full_path);
+        dir = strtok(nullptr, ":");
+    }
+    
+    kfree(path_copy);
+    PrintfQEMU("[find_exec] not found: '%s'\n", cmd);
+    return nullptr; // Не найден
+}
+
 extern "C" uint64_t sys_execve(const char* path, const char* const* argv, const char* const* envp){
     if (!path) return (uint64_t)-22; // -EINVAL
-    // Copy path to kernel buffer
-    size_t path_len = strlen(path);
-    char* kpath = (char*)kmalloc(path_len + 1);
-    if (!kpath) return (uint64_t)-12; // -ENOMEM
-    memcpy(kpath, path, path_len + 1);
+    
+    // Ищем исполняемый файл с поддержкой PATH и симлинков
+    char* kpath = find_executable(path, envp);
+    if (!kpath) return (uint64_t)-2; // -ENOENT
 
     // Copy argv/envp pointers and strings to kernel temp buffers
     const int MAX_ARGS = 64;
@@ -1002,19 +1308,40 @@ extern "C" uint64_t sys_execve(const char* path, const char* const* argv, const 
     // Load ELF: map segments and user stack
     uint64_t entry = 0, ustack_top = 0;
     if (elf64_load_process(kpath, 1<<20, &entry, &ustack_top) != 0){
+        // Файл найден, но загрузчик ELF вернул ошибку (формат/права/иная проблема).
+        // Возвращаем ENOEXEC/Exec format error, чтобы оболочка не продолжала поиск по PATH.
         kfree(kpath);
-        return (uint64_t)-2ll; // -ENOENT
+        return (uint64_t)-8ll; // -ENOEXEC
     }
-    kfree(kpath);
 
     // Build user stack: [argc][argv*][NULL][envp*][NULL][auxv][...strings...]
     uint64_t sp = ustack_top;
 
+    // Helper: simple user-space range check
+    auto is_user_va = [&](uint64_t va, size_t l)->bool{
+        // conservative user-space window: 0x00400000 .. 0x80000000
+        if (va < 0x00400000ULL) return false;
+        if (va + l >= 0x80000000ULL) return false;
+        return true;
+    };
+
     // Copy strings to top descending: argv then envp
     uint64_t arg_addrs[MAX_ARGS];
-    for (int i = argc - 1; i >= 0; --i){ size_t len = kargv_lens[i]; sp -= len; memcpy((void*)sp, kargv_strs[i], len); arg_addrs[i] = sp; }
+    for (int i = argc - 1; i >= 0; --i){ size_t len = kargv_lens[i]; sp -= len; if (!is_user_va(sp, len)) { PrintfQEMU("[execve] unsafe stack write argv i=%d sp=0x%llx len=%zu\n", i, (unsigned long long)sp, len);
+            // cleanup
+            for (int j = 0; j < argc; ++j) if (kargv_strs[j]) kfree((void*)kargv_strs[j]);
+            for (int j = 0; j < envc; ++j) if (kenv_strs[j]) kfree((void*)kenv_strs[j]);
+            if (kpath) kfree(kpath);
+            return (uint64_t)-12; }
+        memcpy((void*)sp, kargv_strs[i], len); arg_addrs[i] = sp; }
     uint64_t env_addrs[MAX_ENVS];
-    for (int i = envc - 1; i >= 0; --i){ size_t len = kenv_lens[i]; sp -= len; memcpy((void*)sp, kenv_strs[i], len); env_addrs[i] = sp; }
+    for (int i = envc - 1; i >= 0; --i){ size_t len = kenv_lens[i]; sp -= len; if (!is_user_va(sp, len)) { PrintfQEMU("[execve] unsafe stack write env i=%d sp=0x%llx len=%zu\n", i, (unsigned long long)sp, len);
+            // cleanup
+            for (int j = 0; j < argc; ++j) if (kargv_strs[j]) kfree((void*)kargv_strs[j]);
+            for (int j = 0; j < envc; ++j) if (kenv_strs[j]) kfree((void*)kenv_strs[j]);
+            if (kpath) kfree(kpath);
+            return (uint64_t)-12; }
+        memcpy((void*)sp, kenv_strs[i], len); env_addrs[i] = sp; }
 
     // Align to 16
     sp &= ~0xFULL;
@@ -1066,7 +1393,17 @@ extern "C" uint64_t sys_execve(const char* path, const char* const* argv, const 
     thread_t* kt = thread_create((void(*)())spawn_entry, a->name);
     if (!kt) { g_pending_spawn = nullptr; kfree(a); return (uint64_t)-12; }
     // Возвращаем PID созданного процесса (ид потока)
+    // Скопируем имя из kpath в a->name до освобождения
+    // (kpath ещё доступен здесь — имя уже скопировали выше при формировании a->name)
+    kfree(kpath);
     return (uint64_t)kt->tid;
+
+exec_cleanup_err:
+    // cleanup allocated argv/env strings
+    for (int j = 0; j < argc; ++j) if (kargv_strs[j]) kfree((void*)kargv_strs[j]);
+    for (int j = 0; j < envc; ++j) if (kenv_strs[j]) kfree((void*)kenv_strs[j]);
+    if (kpath) kfree(kpath);
+    return (uint64_t)-12; // -ENOMEM / EFAULT
 }
 
 // arch_prctl for x86_64: support ARCH_SET_FS (0x1002) and ARCH_GET_FS (0x1003)
@@ -1074,15 +1411,17 @@ static long sys_arch_prctl(long code, uint64_t addr){
     const long ARCH_SET_FS = 0x1002;
     const long ARCH_GET_FS = 0x1003;
     if (code == ARCH_SET_FS){
-        // Опционально промапим область вокруг addr (если уже маплена, безвредно)
-        uint64_t map_start = addr & ~0xFFFULL;
-        uint64_t map_size  = 0x2000ULL;
-        extern void map_user_pages(uint64_t va_start, uint64_t size);
-        map_user_pages(map_start, map_size);
+        // Безопасно промапим 16К вокруг addr — под TCB, static TLS и DTV
+        if (addr) {
+            uint64_t map_start = addr & ~0xFFFULL;
+            uint64_t map_size  = 0x4000ULL;
+            extern void map_user_pages(uint64_t va_start, uint64_t size);
+            map_user_pages(map_start, map_size);
+        }
         PrintfQEMU("[arch_prctl] ARCH_SET_FS = 0x%llx (map hint 0x%llx-0x%llx)\n",
                    (unsigned long long)addr,
-                   (unsigned long long)map_start,
-                   (unsigned long long)(map_start + map_size));
+                   (unsigned long long)(addr & ~0xFFFULL),
+                   (unsigned long long)((addr & ~0xFFFULL) + 0x4000ULL));
         // Минимальный TCB для glibc/musl: FS:0 -> self, FS:0x28 -> stack canary
         if (addr) {
             uint64_t* tcb = (uint64_t*)(uint64_t)addr;
@@ -1138,8 +1477,16 @@ static long sys_faccessat(int dirfd, const char* path, int mode, int /*flags*/){
     return sys_access(path, mode);
 }
 
-static long sys_readlink(const char* /*path*/, char* /*buf*/, unsigned long /*bufsz*/){
-    return -2; // -ENOENT (no symlinks yet)
+static long sys_readlink(const char* path, char* buf, unsigned long bufsz){
+    // Поддержка симлинков во VFS: вернём целевую строку, если есть
+    if (!path || !buf || bufsz == 0) return -22; // -EINVAL
+    // Наша VFS реализована в vfs.cpp; используем её хук
+    const char* t = vfs_readlink_target(path);
+    if (!t) return -2; // -ENOENT
+    unsigned long n = strlen(t);
+    if (n >= bufsz) n = bufsz - 1;
+    memcpy(buf, t, n); buf[n] = '\0';
+    return (long)n;
 }
 
 static long sys_unlink(const char* /*path*/){ return -30; } // -EROFS

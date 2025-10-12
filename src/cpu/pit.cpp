@@ -1,9 +1,11 @@
 #include <pit.h>
-#include <debug.h>
+#include <debug.h> 
 #include <pic.h>
 #include <idt.h>
 // VGA text mode uses hardware cursor; no backbuffer swap needed
 #include <thread.h>
+#include <vbe.h>
+#include <vbetty.h>
 
 // Global variables
 volatile uint64_t pit_ticks = 0;
@@ -13,7 +15,11 @@ volatile uint32_t pit_frequency = 1000; // Default 100 Hz
 void pit_handler(cpu_registers_t* regs) {
     pit_ticks++;
     (void)regs;
-    // VGA: аппаратный курсор, свопов нет
+    if (vbe_is_initialized()) {
+        // Выполняем показ экрана только из таймера
+        vbe_cursor_tick();
+        vbe_swap();
+    }
     
     // Вызываем планировщик реже - каждые 10 тиков (10 мс при 1000 Гц)
     if (init && (pit_ticks % 10 == 0)) {

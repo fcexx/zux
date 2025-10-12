@@ -6,6 +6,7 @@
 #include <multiboot2.h>
 #include <heap.h>
 #include <vga.h>
+#include <vbe.h>
 #include <pit.h>
 #include <thread.h>
 #include <ata.h>
@@ -20,12 +21,7 @@
 
 char g_tty_private_tag = 0;
 
-// Вернём переменные фреймбуфера, чтобы код, завязанный на них, компилировался
-extern "C" {
-    uint32_t* framebuffer_addr = 0;
-    uint32_t fb_height = 0;
-    uint32_t fb_pitch = 0;
-}
+// Фреймбуфер инициализируется через vbe_init() в parse_multiboot2
 
 // Запуск интерактивного шелла по умолчанию (busybox sh -i)
 extern "C" void start_default_shell();
@@ -86,6 +82,12 @@ void parse_multiboot2(uint64_t addr) {
                 PrintfQEMU("  height: %u\n", fb_tag->framebuffer_height);
                 PrintfQEMU("  pitch: %u\n", fb_tag->framebuffer_pitch);
                 PrintfQEMU("  bpp: %u\n", fb_tag->framebuffer_bpp);
+                // Сохраним и активируем фреймбуфер для UEFI/GOP (Multiboot2 type=8)
+                vbe_init((uint64_t)fb_tag->framebuffer_addr,
+                         fb_tag->framebuffer_width,
+                         fb_tag->framebuffer_height,
+                         fb_tag->framebuffer_pitch,
+                         fb_tag->framebuffer_bpp);
                 break;
             }
             case 3: { // Module
@@ -137,7 +139,7 @@ static int kexecve(const char* path, const char* const* argv){
             argc++;
         }
     }
-    const char env0[] = "PATH=/bin:/usr/bin";
+    const char env0[] = "PATH=/bin:/usr/bin:/sbin";
     const char env1[] = "HOME=/root";
     const char env2[] = "TERM=linux";
     const char env3[] = "PS1=~ # ";
@@ -182,12 +184,39 @@ static int kexecve(const char* path, const char* const* argv){
     vec[idx++] = AT_RANDOM; vec[idx++] = at_random_ptr;
     vec[idx++] = AT_NULL;   vec[idx++] = 0;
 
-    uint64_t tls_va = (ustack_top & ~0xFFFFFULL) - 0x1000ULL;
-    void* tls_page = kmalloc(0x2000);
-    if (tls_page) {
-        uint64_t tls_phys = ((uint64_t)tls_page + 0xFFFULL) & ~0xFFFULL;
-        paging_map_page(tls_va, tls_phys, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
-        memset((void*)tls_va, 0, 0x1000);
+    // Разместим TLS/TCB ниже стека и выделим запас: 16 КБ под TCB+static TLS+DTV
+    uint64_t tls_va = (ustack_top & ~0xFFFFFULL) - 0x4000ULL;
+    void* tls_pages = kmalloc(0x5000);
+    if (tls_pages) {
+        uint64_t tls_phys0 = ((uint64_t)tls_pages + 0xFFFULL) & ~0xFFFULL;
+        // map 4 pages for TLS region
+        for (uint64_t off = 0; off < 0x4000ULL; off += 0x1000ULL) {
+            paging_map_page(tls_va + off, tls_phys0 + off, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+        }
+        memset((void*)(tls_va + 0x0000), 0, 0x4000);
+        // Минимальный заголовок TCB, совместимый с glibc: [0]=tcb(self), [1]=dtv
+        // DTV разместим в конце региона, 4 КБ под массив указателей модулей
+        uint64_t dtv_ptr = (tls_va + 0x4000 - 0x1000ULL);
+        uint64_t* tcb = (uint64_t*)(tls_va);
+        tcb[0] = tls_va;      // tcb
+        tcb[1] = dtv_ptr;     // dtv (glibc ожидает валидный указатель)
+        tcb[2] = tls_va;      // self (дублируем для совместимости с вариантами макетов)
+        tcb[3] = 0;           // multiple_threads = 0
+        // stack_guard/pointer_guard по ABI часто располагаются по +0x28 и +0x30
+        if (g_at_random_ptr) {
+            uint64_t can = *(const uint64_t*)(uint64_t)g_at_random_ptr;
+            *(uint64_t*)(tls_va + 0x28) = can;
+            *(uint64_t*)(tls_va + 0x30) = can ^ 0x5a5a5a5a5a5a5a5aULL;
+        }
+        // Инициализируем DTV (4 КБ): нулевая генерация, свободно
+        memset((void*)dtv_ptr, 0, 0x1000);
+        // Установим FS base через MSR, чтобы ранний код мог использовать TLS до arch_prctl
+        const uint32_t IA32_FS_BASE = 0xC0000100;
+        uint32_t lo = (uint32_t)(tls_va & 0xFFFFFFFFu);
+        uint32_t hi = (uint32_t)(tls_va >> 32);
+        asm volatile("wrmsr" :: "c"(IA32_FS_BASE), "a"(lo), "d"(hi));
+        PrintfQEMU("[kexecve] TLS initialized at 0x%llx (dtv=0x%llx)\n",
+                   (unsigned long long)tls_va, (unsigned long long)dtv_ptr);
     }
 
     const char* base = path; for (const char* p = path; *p; ++p) if (*p=='/') base = p+1;
@@ -195,6 +224,8 @@ static int kexecve(const char* path, const char* const* argv){
     {
         thread_t* ut = thread_get_current_user();
         if (ut) {
+            // Сохраним FS base в структуре потока
+            ut->user_fs_base = tls_va;
             extern char g_tty_private_tag;
             for (int i = 0; i < 3; ++i) ut->fds[i] = nullptr;
             fs_file_t* f0 = (fs_file_t*)kmalloc(sizeof(fs_file_t)); if (f0){ memset(f0,0,sizeof(*f0)); f0->private_data=&g_tty_private_tag; }
@@ -232,60 +263,56 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
     // 砥 ࠭  ࠭ 맮
     paging_init();
 
-    // ���� ������� �३����� (��᫥ parse_multiboot2/vbe_init, �� ��� ����㯠)
-    if (false && framebuffer_addr && fb_height && fb_pitch) {
-        uint64_t fb_start = (uint64_t)framebuffer_addr;
-        uint64_t fb_size  = (uint64_t)fb_height * (uint64_t)fb_pitch;
-        // ВЫРАВНИВАНИЕ ПО 4К СТРАНИЦЕ, а не на 16 байт
-        uint64_t map_start = fb_start & ~0xFFFULL;                      // align down to 4K
-        uint64_t map_end   = (fb_start + fb_size + 0xFFFULL) & ~0xFFFULL; // align up to 4K
-        uint64_t map_size  = map_end - map_start;
-        PrintfQEMU("[fbmap] fb_start=0x%llx size=%llu map_start=0x%llx map_size=%llu\n",
-                   (unsigned long long)fb_start,
-                   (unsigned long long)fb_size,
-                   (unsigned long long)map_start,
-                   (unsigned long long)map_size);
-        paging_map_range(map_start, map_start, map_size, PAGE_PRESENT | PAGE_WRITABLE);
-    }
-
+    // Сначала инициализируем heap, затем консоль (для VBE backbuffer)
     heap_init();
-    vga_init();
-
+    if (vbe_is_initialized()) {
+        vbec_init_console();
+        kprintf("Framebuffer console %ux%u %u bpp initialized\n\n", vbe_get_width(), vbe_get_height(), vbe_get_bpp());
+    } else {
+        vga_init();
+        vga_clear(15, 0);
+        kprintf("VGA text console 80x25 initialized\n\n");
+    }
     ps2_keyboard_init();
 
-    vga_clear(15, 0);
-
-    kprintf("Solar kernel v0.10.0d\n");
-    kprintf("VGA text console 80x25 initialized\n\n");
+    kprintf("Entix kernel v0.10.0d\n");
     
     thread_init();
-
+    PrintfQEMU("thread_init: done\n");
     // swap экрана выполняется только из PIT
 
     ata_init();
+    // Если дисков нет — не ждём ничего от FAT32, работаем с initramfs
     iothread_init();
 
     // swap экрана выполняется только из PIT
-
-    // ���樠�����㥬 䠩����� ��⥬� ⮫쪮 ��᫥ ATA
-    kprintf("fat32: Initializing filesystem...\n");
-    fs_interface_t* fat32_interface = fat32_get_interface();
-    if (fs_init(fat32_interface) == 0) {
-        kprintf("fat32: Filesystem initialized successfully\n");
-    } else {
-        kprintf("fat32: Failed to initialize filesystem\n");
-    }          
 
     // swap экрана выполняется только из PIT
 
     // ���樠������ GDT/TSS
     gdt_init();
     // �뤥�塞 � ����ࠨ���� kernel-�⥪ ��� �������� (current) ��⮪�, ���� �� ���室� �� ring3 �� IRQ �㤥� �㫥��� rsp0
+    PrintfQEMU("[kernel] calling kmalloc_aligned(16384, 4096)...\n");
     void* kstack = kmalloc_aligned(16384, 4096);
     if (!kstack) {
-        kprintf("fatal: kmalloc_aligned failed; halted");
-        for (;;);
+        // Fallback: try plain kmalloc and align the result manually to 4KB
+        void* raw = kmalloc(16384 + 4096);
+        if (raw) {
+            uint64_t a = (uint64_t)raw;
+            uint64_t aligned = (a + 4095ULL) & ~0xFFFULL;
+            kstack = (void*)aligned;
+            PrintfQEMU("[tss] kmalloc_aligned fallback: raw=%p aligned=%p\n", raw, kstack);
+        } else {
+            // Dump heap info to help diagnose why allocation failed
+            dump_heap_info();
+            // Also dump recent allocation history for context
+            extern void dump_alloc_history();
+            dump_alloc_history();
+            kprintf("fatal: kmalloc_aligned failed; halted\n");
+            for (;;);
+        }
     }
+    PrintfQEMU("ppppppppppppppp");
     uint64_t kstack_top = (uint64_t)kstack + 16384;
     PrintfQEMU("[tss] kstack=%p kstack_top=0x%llx\n", kstack, (unsigned long long)kstack_top);
     if (kstack) memset(kstack, 0xCD, 16384);
@@ -316,21 +343,10 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
     }
     else { kprintf("Failed to mount busybox module; kernel unable to start"); for (;;); }
 
-    kprintf("\nSolar kernel v.0.10.0 (demo) without init script\n");
-    // Запускаем начальный шелл
-    const char* argv_fallback[] = { "busybox", "sh", "-i", nullptr };
-    (void)kexecve("/bin/busybox", argv_fallback);
-
+    kprintf("\nEntix kernel v.0.10.0 (demo) without init script\n");
     
-
-    // Если пользовательский процесс завершился/упал, попытаться перезапустить шелл
-    for(;;) {
-        thread_t* u = thread_get_current_user();
-        if (!u) {
-            const char* argv2[] = { "busybox", "sh", "-i", nullptr };
-            kprintf("User task ended. Restarting shell...\n");
-            (void)kexecve("/bin/busybox", argv2);
-        }
-        asm volatile("hlt");
-    }
+    const char* argv_fallback[] = { "sh", "-i", nullptr };
+    (void)kexecve("/bin/busybox", argv_fallback);
+    // Не перезапускаем бесконечно: если процесс упал, просто остаёмся в idle
+    for(;;) { asm volatile("hlt"); }
 } 

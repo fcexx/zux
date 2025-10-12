@@ -16,9 +16,13 @@ static void ata_handler(cpu_registers_t* regs) {
 
 static void ata_wait(uint16_t base) {
     uint8_t status; 
-    uint32_t timeout = 1000000;
+    uint32_t timeout = 200000; // faster fail on absent device
     do {
         status = inb(base + ATA_STATUS);
+        if (status == 0xFF || status == 0x00) {
+            // Likely no device on this bus
+            break;
+        }
         if(--timeout == 0) {
             kprintf("ATA: Timeout waiting for device\n");
             break;
@@ -49,7 +53,8 @@ static int ata_init_drive(uint16_t base, uint8_t drive) {
     ata_wait(base);
 
     uint8_t status = inb(base + ATA_STATUS);
-    uint32_t timeout = 1000000; //increased timeout
+    if (status == 0xFF || status == 0x00) return -1; // no device
+    uint32_t timeout = 200000; // faster timeout
     while ((status & ATA_SR_BSY) && (--timeout != 0)) {
         status = inb(base + ATA_STATUS);
     }
@@ -58,7 +63,7 @@ static int ata_init_drive(uint16_t base, uint8_t drive) {
     if (ata_check_error(base)) return -1;
 
     //Check if DRQ is set, indicating data is ready to be read
-    timeout = 1000000; // Reset timeout
+    timeout = 200000; // Reset timeout quicker
     while (!((status & ATA_SR_DRQ) || (status & ATA_SR_ERR)) && (--timeout != 0)) {
         status = inb(base + ATA_STATUS);
     }
@@ -213,7 +218,7 @@ int ata_read_sector(uint8_t drive, uint32_t lba, uint8_t* buffer) {
     
     // Ждем готовности устройства
     uint8_t status;
-    uint32_t timeout = 1000000;
+    uint32_t timeout = 200000;
     do {
         status = inb(base + ATA_STATUS);
         if (--timeout == 0) {
@@ -228,7 +233,7 @@ int ata_read_sector(uint8_t drive, uint32_t lba, uint8_t* buffer) {
     }
 
     // Ждем готовности данных
-    timeout = 1000000;
+    timeout = 200000;
     do {
         status = inb(base + ATA_STATUS);
         if (--timeout == 0) {
@@ -289,7 +294,7 @@ int ata_write_sector(uint8_t drive, uint32_t lba, uint8_t* buffer) {
     outb(base + ATA_DRIVE, 0xE0 | (head << 4) | ((lba >> 24) & 0x0F));
     outb(base + ATA_COMMAND, ATA_CMD_WRITE);
     uint8_t status;
-    uint32_t timeout = 1000000;
+    uint32_t timeout = 200000;
 
     do { status = inb(base + ATA_STATUS); } while (((status & ATA_SR_BSY) || !(status & ATA_SR_DRQ)) && --timeout);
 
@@ -300,7 +305,7 @@ int ata_write_sector(uint8_t drive, uint32_t lba, uint8_t* buffer) {
         uint16_t data = buffer[i*2] | (buffer[i*2+1] << 8);
         outw(base + ATA_DATA, data);
     }
-    timeout = 1000000;
+    timeout = 200000;
 
     do { status = inb(base + ATA_STATUS); } while ((status & ATA_SR_BSY) && --timeout);
     if (timeout == 0 || (status & ATA_SR_ERR)) {

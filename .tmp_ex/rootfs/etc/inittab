@@ -1,0 +1,5 @@
+# BusyBox inittab
+::sysinit:/etc/rc.init
+::askfirst:-/bin/sh
+::ctrlaltdel:/bin/reboot
+::shutdown:/bin/umount -a -r

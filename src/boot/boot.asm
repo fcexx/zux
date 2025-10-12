@@ -1,4 +1,4 @@
-; boot.asm - Загрузчик Multiboot2 для Solar OS
+; boot.asm - Загрузчик Multiboot2 для Entix OS
 ; Компилировать: nasm -f elf64 boot.asm -o boot.o
 
 section .multiboot2
@@ -9,14 +9,14 @@ mb2_start:
     dd mb2_end - mb2_start       ; размер заголовка
     dd 0x100000000 - (0xe85250d6 + 0 + (mb2_end - mb2_start)) ; контрольная сумма
 
-    ; Тег запроса видеорежима
+    ; Тег запроса видеорежима (Multiboot2 framebuffer request)
     align 8
-    dw 0                         ; тип = видеорежим
-    dw 0                         ; флаги
+    dw 5                         ; type = 5 (framebuffer)
+    dw 0                         ; flags (optional)
     dd 20                        ; размер
-    dd 800                       ; ширина
-    dd 600                       ; высота
-    dd 32                        ; глубина цвета (32 бита)
+    dd 0                         ; ширина (0 = лучший доступный режим)
+    dd 0                         ; высота (0 = лучший доступный режим)
+    dd 0                         ; глубина цвета (0 = лучший доступный режим)
 
     ; Конечный тег
     align 8
@@ -199,9 +199,15 @@ long_mode_start:
     mov fs, ax
     mov gs, ax
 
-    mov rdi, rsi                ; multiboot2_info_ptr -> rdi
-    mov rsi, rdi                ; multiboot2_magic -> rsi
-    mov rsi, rdi                ; multiboot2_magic -> rsi
+	; Настроить 64-битный стек и выровнять на 16 байт для System V ABI
+	lea rsp, [rel stack_top]
+	and rsp, -16
+	; Требование SysV: перед CALL RSP%16 должно быть == 8, чтобы внутри функции было 16
+	sub rsp, 8
+
+	; Аргументы уже находятся в EDI/ESI из 32-битной части (_start):
+	;   EDI = multiboot2_magic, ESI = multiboot2_info_ptr
+	; В long mode они нулерасширены в RDI/RSI — не трогаем их.
     cli
     ; Вызов ядра
     call kernel_main

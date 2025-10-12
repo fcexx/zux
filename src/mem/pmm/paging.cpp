@@ -1,5 +1,6 @@
 #include <paging.h>
 #include <debug.h>
+#include <vbe.h>
 #include <stdint.h>
 
 // minimal size_t for freestanding
@@ -95,11 +96,26 @@ void paging_init() {
     // Identity map first 64MB (kernel-only)
     paging_map_range(0x00000000ULL, 0x00000000ULL, 0x04000000ULL, PAGE_PRESENT | PAGE_WRITABLE);
 
-    // TEMP: map first 4MB as user-accessible to avoid early user PF on low addresses
+    // TEMP: map first 4MB as user-accessible to avoid some PF during debugging
+    // Reduced from 64MB to 4MB to limit exposure of kernel identity mappings to user mode.
+    // NOTE: this is still a debugging aid — remove before production use.
     paging_map_range(0x00000000ULL, 0x00000000ULL, 0x00400000ULL, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
     
-    // Map a 16MB window where typical linear framebuffer lies (0xFD000000)
-    paging_map_range(0xFD000000ULL, 0xFD000000ULL, 0x01000000ULL, PAGE_PRESENT | PAGE_WRITABLE);
+    // Map linear framebuffer if provided by firmware (e.g., virtio/qxl address varies)
+    uint64_t fb_addr = vbe_get_addr();
+    uint32_t fb_pitch = vbe_get_pitch();
+    uint32_t fb_height = vbe_get_height();
+    uint32_t fb_bpp = vbe_get_bpp();
+    if (fb_addr && fb_pitch && fb_height && (fb_bpp==16 || fb_bpp==24 || fb_bpp==32)) {
+        uint64_t fb_size = (uint64_t)fb_pitch * (uint64_t)fb_height;
+        // округлим до ближайшего мегабайта вверх, ограничим 64MB
+        if (fb_size < 0x00100000ULL) fb_size = 0x00100000ULL;
+        if (fb_size > 0x04000000ULL) fb_size = 0x04000000ULL;
+        uint64_t fb_base = fb_addr & ~0xFFFFFULL; // выровняем вниз по 1MB
+        uint64_t map_size = (fb_size + 0xFFFFFULL) & ~0xFFFFFULL;
+        paging_map_range(fb_base, fb_base, map_size, PAGE_PRESENT | PAGE_WRITABLE);
+        PrintfQEMU("[paging] mapped framebuffer at 0x%llx size=0x%llx\n", (unsigned long long)fb_base, (unsigned long long)map_size);
+    }
     
     // Load CR3
     paging_load_cr3((uint64_t)&page_table_l4);

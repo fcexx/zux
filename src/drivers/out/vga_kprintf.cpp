@@ -1,5 +1,6 @@
 #include <vbetty.h>
 #include <vga.h>
+#include <vbe.h>
 #include <spinlock.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -11,7 +12,7 @@ static uint32_t cur_x = 0;
 static uint32_t cur_y = 0;
 
 // Current colors (VGA palette indices 0..15)
-static uint8_t fg_idx = 15;
+static uint8_t fg_idx = 7;
 static uint8_t bg_idx = 0;
 static bool ansi_bold = false;
 
@@ -20,25 +21,25 @@ spinlock_t vga_printf_lock = {0};
 static inline void vga_newline() {
     cur_x = 0;
     if (++cur_y >= cons_h) {
-        vga_scroll_up(bg_idx);
+        if (vbe_is_initialized()) vbec_scroll_up(bg_idx); else vga_scroll_up(bg_idx);
         cur_y = cons_h - 1;
     }
-    vga_set_cursor(cur_x, cur_y);
+    if (vbe_is_initialized()) vbec_set_cursor(cur_x, cur_y); else vga_set_cursor(cur_x, cur_y);
 }
 
 static inline void vga_putc(char c) {
     if (c == '\n') { vga_newline(); return; }
-    if (c == '\r') { cur_x = 0; vga_set_cursor(cur_x, cur_y); return; }
+    if (c == '\r') { cur_x = 0; if (vbe_is_initialized()) vbec_set_cursor(cur_x, cur_y); else vga_set_cursor(cur_x, cur_y); return; }
     if (c == '\b') {
         if (cur_x > 0) { cur_x--; }
         else if (cur_y > 0) { cur_y--; cur_x = cons_w - 1; }
-        vga_put_cell(cur_x, cur_y, ' ', fg_idx, bg_idx);
-        vga_set_cursor(cur_x, cur_y);
+        if (vbe_is_initialized()) vbec_put_cell(cur_x, cur_y, ' ', fg_idx, bg_idx); else vga_put_cell(cur_x, cur_y, ' ', fg_idx, bg_idx);
+        if (vbe_is_initialized()) vbec_set_cursor(cur_x, cur_y); else vga_set_cursor(cur_x, cur_y);
         return;
     }
     if (cur_x >= cons_w) { vga_newline(); }
-    vga_put_cell(cur_x, cur_y, c, fg_idx, bg_idx);
-    if (++cur_x >= cons_w) vga_newline(); else vga_set_cursor(cur_x, cur_y);
+    if (vbe_is_initialized()) vbec_put_cell(cur_x, cur_y, c, fg_idx, bg_idx); else vga_put_cell(cur_x, cur_y, c, fg_idx, bg_idx);
+    if (++cur_x >= cons_w) vga_newline(); else { if (vbe_is_initialized()) vbec_set_cursor(cur_x, cur_y); else vga_set_cursor(cur_x, cur_y); }
 }
 
 static void vga_puts(const char* s) {
@@ -110,10 +111,15 @@ int kprintf(const char* fmt, ...) {
     acquire(&vga_printf_lock);
 
     // lazy init
-    cons_w = vga_get_width();
-    cons_h = vga_get_height();
-    // sync cursor with hardware in case others moved it
-    vga_get_cursor(&cur_x, &cur_y);
+    if (vbe_is_initialized()) {
+        cons_w = vbec_get_width();
+        cons_h = vbec_get_height();
+        vbec_get_cursor(&cur_x, &cur_y);
+    } else {
+        cons_w = vga_get_width();
+        cons_h = vga_get_height();
+        vga_get_cursor(&cur_x, &cur_y);
+    }
 
     va_list ap; va_start(ap, fmt);
     while (*fmt) {
@@ -179,6 +185,7 @@ int kprintf(const char* fmt, ...) {
         }
     }
     va_end(ap);
+    // swap перенесён в PIT обработчик; здесь ничего не делаем
     release(&vga_printf_lock);
     return 0;
 }

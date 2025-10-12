@@ -7,9 +7,9 @@ build/
 *.map
 
 # Disk images and VM artifacts
-solar.img
-solar.vmdk
-solar.vmdk.lck/
+entix.img
+entix.vmdk
+entix.vmdk.lck/
 *.img
 *.vmdk
 
@@ -22,7 +22,7 @@ toolchains/
 # Local binaries copied into hda (runtime-only)
 hda/bin/
 # Keep kernel image in repo if you want; comment next line to track it
-# hda/boot/solarImg
+# hda/boot/entixImg
 
 # Editor/OS junk
 .DS_Store

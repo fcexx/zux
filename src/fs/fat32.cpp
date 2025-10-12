@@ -1301,11 +1301,17 @@ static fs_interface_t fat32_interface = {
 };
 
 extern "C" {
-fs_interface_t* fat32_get_interface() {
-    return &fat32_interface;
-}
+    fs_interface_t* fat32_get_interface() {
+        return &fat32_interface;
+    }
 
-int fat32_init() {
-    return fat32_mount(0);
-}
+    int fat32_init() {
+        // Быстрый выход, если диска нет — чтобы не зависать на попытках чтения
+        ata_drive_t* d0 = ata_get_drive(0);
+        if (!d0 || !d0->present) {
+            PrintfQEMU("[FAT32] skip: no drive 0 present, not mounting\n");
+            return -19; // -ENODEV
+        }
+        return fat32_mount(0);
+    }
 }

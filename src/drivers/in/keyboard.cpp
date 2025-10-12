@@ -7,6 +7,7 @@
 #include <spinlock.h>
 #include <stdint.h>
 #include <string.h>
+#include <heap.h>
 #include <vga.h>
 #include <vga.h>
 
@@ -57,6 +58,7 @@ static const char scancode_to_ascii_shift[128] = {
 #define KEY_PGDN   0x87
 #define KEY_INSERT 0x88
 #define KEY_DELETE 0x89
+#define KEY_TAB     0x8A
 
 // Флаги состояния клавиатуры
 static volatile bool shift_pressed = false;
@@ -99,6 +101,7 @@ static char get_from_buffer() {
 // Обработчик прерывания клавиатуры
 extern "C" void keyboard_handler(cpu_registers_t* regs) {
     uint8_t scancode = inb(0x60);
+    //PrintfQEMU("[KEYBOARD] scancode=0x%02x\n", scancode);
     
     // Обрабатываем только нажатие клавиш (не отпускание)
     if (scancode & 0x80) {
@@ -162,6 +165,9 @@ extern "C" void keyboard_handler(cpu_registers_t* regs) {
             case 0x53: // Delete
                 add_to_buffer(KEY_DELETE);
                 break;
+            case 0x0F: // Tab
+                add_to_buffer(KEY_TAB);
+                break;
             default:
                 // Обычная клавиша
                 if (scancode < 128) {
@@ -211,6 +217,8 @@ char kgetc() {
 int kgetc_available() {
     return buffer_count;
 }
+
+// Убрана локальная реализация автодополнения — используется глобальная в sys_read
 
 // Получить строку с поддержкой стрелок и редактирования
 char* kgets(char* buffer, int max_length) {
@@ -266,6 +274,16 @@ char* kgets(char* buffer, int max_length) {
                 buffer[i] = buffer[i + 1];
             }
             buffer_pos--;
+        } else if (c == (char)KEY_TAB) {
+            // Простая вставка пробела при Tab в kgets (автодополнение выполняется в sys_read для шелла)
+            if (buffer_pos < max_length - 1) {
+                for (int i = buffer_pos; i > cursor_pos; i--) {
+                    buffer[i] = buffer[i - 1];
+                }
+                buffer[cursor_pos] = ' ';
+                buffer_pos++;
+                cursor_pos++;
+            }
         } else if (c >= 32 && c < 127 && buffer_pos < max_length - 1) {
             // Вставка символа
             for (int i = buffer_pos; i > cursor_pos; i--) {

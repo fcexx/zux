@@ -1,9 +1,18 @@
 #include <idt.h>
 #include <debug.h>
 #include <vga.h>
+#include <vbe.h>
 #include <pic.h>
 #include <stdint.h>
 #include <thread.h>
+#include <stdint.h>
+#include <stddef.h>
+// Avoid including <cstdint> because cross-toolchain headers may not provide it; use uint64_t instead
+
+// Forward declare C-linkage helpers from other compilation units
+extern "C" void dump_alloc_history();
+extern "C" uint64_t dbg_saved_rbx_in;
+extern "C" uint64_t dbg_saved_rbx_out;
 
 // локальные таблицы обработчиков (неиспользуемые предупреждения устраним использованием ниже)
 static void (*irq_handlers[16])() = {nullptr};
@@ -22,25 +31,26 @@ const char* exception_messages[] = {
 };
 
 static void ud_fault_handler(cpu_registers_t* regs) {
-    // Invalid Opcode (#UD). Если из user-space — корректно завершаем текущий юзер-процесс,
-    // чтобы не валить ядро из-за мусорного RIP после выхода.
+    // Invalid Opcode (#UD). В ring3 не эмулируем — завершаем поток.
     if ((regs->cs & 3) == 3) {
-        PrintfQEMU("[ud] user invalid opcode at RIP=0x%lx, kill process\n", regs->rip);
+        PrintfQEMU("[ud] user invalid opcode at RIP=0x%lx\n", regs->rip);
         thread_t* user = thread_get_current_user();
         if (user) {
-            int tid = (int)user->tid;
-            thread_stop(tid);
+            thread_stop((int)user->tid);
             thread_set_current_user(nullptr);
         }
-        for(;;) { thread_yield(); }
+        for(;;){ thread_yield(); }
     }
     // Иначе — ядро: печатаем и стоп
     kprintf("Invalid Opcode in kernel. RIP=0x%lx\n", regs->rip);
-    // no swap in VGA text mode
     for(;;);
 }
 
 static void page_fault_handler(cpu_registers_t* regs) {
+    if (vbe_is_initialized()) {
+        // Выполняем показ экрана только из таймера
+        vbe_swap();
+    }
     unsigned long long cr2;
     asm volatile("mov %%cr2, %0" : "=r"(cr2));
     unsigned long long err = regs->error_code;
@@ -54,12 +64,117 @@ static void page_fault_handler(cpu_registers_t* regs) {
         PrintfQEMU("[pf user] cr2=0x%llx err=0x%llx P=%d W=%d U=%d RSVD=%d ID=%d RIP=0x%llx\n",
                    cr2, err, p, wr, us, rsvd, id, regs->rip);
         kprintf("User page fault: addr=0x%llx err=0x%llx RIP=0x%llx\n", cr2, err, regs->rip);
+
+        // Дополнительный детальный дамп (безопасно, с защитой от рекурсивного дампа)
+        static int pf_dumping = 0;
+        if (!pf_dumping) {
+            pf_dumping = 1;
+            extern uint64_t elf_last_load_base;
+            extern uint64_t elf_last_brk_base;
+            PrintfQEMU("[pf dump] elf_load=0x%llx elf_brk=0x%llx (addrs: &load=0x%llx &brk=0x%llx)\n",
+                       (unsigned long long)elf_last_load_base, (unsigned long long)elf_last_brk_base,
+                       (unsigned long long)&elf_last_load_base, (unsigned long long)&elf_last_brk_base);
+            // Print current user process info if available
+            thread_t* tcur = thread_get_current_user();
+            if (tcur) {
+                PrintfQEMU("[pf userinfo] pid=%d name=%s rsp=0x%llx rip_expected=0x%llx\n",
+                           (int)tcur->tid, tcur->name, (unsigned long long)tcur->user_stack, (unsigned long long)tcur->user_rip);
+            } else {
+                PrintfQEMU("[pf userinfo] no registered current_user\n");
+            }
+            // Если переменные содержат явно текстовые данные — предполагаем повреждение и обнуляем, чтобы
+            // дальнейшая логика не полагалась на мусорные значения.
+            auto looks_like_ascii = [&](uint64_t v)->bool{
+                int printable = 0;
+                for (int i = 0; i < 8; ++i) {
+                    unsigned char c = (unsigned char)((v >> (i*8)) & 0xFF);
+                    if (c >= 32 && c < 127) printable++;
+                }
+                return printable >= 4; // если >=4 байт печатаемые — вероятно строка
+            };
+            if (looks_like_ascii(elf_last_load_base) || looks_like_ascii(elf_last_brk_base)) {
+                PrintfQEMU("[pf dump] NOTICE: elf_last_* appear ascii-like, dumping nearby memory for diagnosis\n");
+                // Dump 64 bytes around each variable address (if readable)
+                const unsigned char* p_load = (const unsigned char*)((uint64_t)&elf_last_load_base - 32);
+                PrintfQEMU("[mem dump] around &elf_last_load_base=0x%llx:\n", (unsigned long long)(unsigned long long)&elf_last_load_base);
+                for (int i = 0; i < 64; i += 8) {
+                    PrintfQEMU("  %02x%02x%02x%02x%02x%02x%02x%02x ",
+                               p_load[i+0], p_load[i+1], p_load[i+2], p_load[i+3], p_load[i+4], p_load[i+5], p_load[i+6], p_load[i+7]);
+                    PrintfQEMU("\n");
+                }
+                const unsigned char* p_brk = (const unsigned char*)((uint64_t)&elf_last_brk_base - 32);
+                PrintfQEMU("[mem dump] around &elf_last_brk_base=0x%llx:\n", (unsigned long long)(unsigned long long)&elf_last_brk_base);
+                for (int i = 0; i < 64; i += 8) {
+                    PrintfQEMU("  %02x%02x%02x%02x%02x%02x%02x%02x ",
+                               p_brk[i+0], p_brk[i+1], p_brk[i+2], p_brk[i+3], p_brk[i+4], p_brk[i+5], p_brk[i+6], p_brk[i+7]);
+                    PrintfQEMU("\n");
+                }
+            }
+            // Печатаем регистры
+            PrintfQEMU("[pf regs] rax=0x%llx rbx=0x%llx rcx=0x%llx rdx=0x%llx\n",
+                       regs->rax, regs->rbx, regs->rcx, regs->rdx);
+            PrintfQEMU("[pf regs] rsi=0x%llx rdi=0x%llx rbp=0x%llx rsp=0x%llx\n",
+                       regs->rsi, regs->rdi, regs->rbp, regs->rsp);
+            PrintfQEMU("[pf regs] r15=0x%llx r14=0x%llx r13=0x%llx r12=0x%llx\n",
+                       regs->r15, regs->r14, regs->r13, regs->r12);
+            PrintfQEMU("[pf misc] rip=0x%llx cs=0x%llx rflags=0x%llx ss=0x%llx\n",
+                       regs->rip, regs->cs, regs->rflags, regs->ss);
+
+            // Попробуем напечатать несколько байт вокруг RIP (если RIP в ожидаемом user-диапазоне)
+            auto in_user_range_simple = [&](uint64_t va)->bool{
+                uint64_t v = va;
+                if (elf_last_load_base && elf_last_brk_base) {
+                    if (v >= elf_last_load_base && v < (elf_last_brk_base + 0x100000ULL)) return true;
+                }
+                // If we only know brk base
+                if (!elf_last_load_base && elf_last_brk_base) {
+                    if (v >= 0x00400000ULL && v < (elf_last_brk_base + 0x100000ULL)) return true;
+                }
+                // If ELF heuristics are not set yet, fall back to a reasonable user-code window
+                if (!elf_last_load_base && !elf_last_brk_base) {
+                    if (v >= 0x00400000ULL && v < 0x04000000ULL) return true; // 4..64MB
+                }
+                if (v >= (0x30000000ULL - 0x02000000ULL) && v < 0x30000000ULL) return true;
+                if (v >= 0x40000000ULL && v < 0x80000000ULL) return true;
+                return false;
+            };
+
+            if (in_user_range_simple((uint64_t)regs->rip)) {
+                const uint8_t* ip = (const uint8_t*)(uint64_t)regs->rip;
+                uint8_t code[32];
+                for (int i = 0; i < 32; ++i) {
+                    // Берём по одному байту; если чтение вызовет новый PF, он будет обработан рекурсивно,
+                    // но мы ограничили глубину pf_dumping, поэтому не зациклится
+                    code[i] = ip[i];
+                }
+                PrintfQEMU("[pf code] ");
+                for (int i = 0; i < 32; ++i) PrintfQEMU("%02x ", (unsigned)code[i]);
+                PrintfQEMU("\n");
+            } else {
+                PrintfQEMU("[pf code] RIP not in known user ranges, skipping code dump\n");
+            }
+
+            // Печать нескольких слов со стека
+            if (in_user_range_simple((uint64_t)regs->rsp)) {
+                uint64_t* sp = (uint64_t*)(uint64_t)regs->rsp;
+                PrintfQEMU("[pf stack] ");
+                for (int i = 0; i < 8; ++i) {
+                    uint64_t v = sp[i];
+                    PrintfQEMU("0x%llx ", v);
+                }
+                PrintfQEMU("\n");
+            }
+            pf_dumping = 0;
+        }
+
         thread_t* user = thread_get_current_user();
         if (user) {
             thread_stop((int)user->tid);
             thread_set_current_user(nullptr);
         }
-        for(;;) { thread_yield(); }
+        // Возвращаемся к планировщику вместо бесконечного цикла
+        //thread_yield();
+        return;
     }
 
     // Иначе — kernel fault: печатаем максимум и останавливаемся
@@ -70,242 +185,81 @@ static void page_fault_handler(cpu_registers_t* regs) {
 }
 
 static void gp_fault_handler(cpu_registers_t* regs){
-    // Если из ring3 — попробуем распознать «тестовые» инструкции и мягко их пропустить/починить
+    if (vbe_is_initialized()) {
+        // Выполняем показ экрана только из таймера
+        vbe_swap();
+    }
+    // Строгая семантика для POSIX-подобного поведения: никаких эмуляций в ring3.
+    // General Protection Fault в пользовательском процессе рассматривается как фатальная ошибка процесса.
     if ((regs->cs & 3) == 3) {
-        const uint8_t* ip = (const uint8_t*)(uint64_t)regs->rip;
-        uint8_t b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
-        // Читаем до 7 байт по RIP
-        b0 = ip[0]; b1 = ip[1]; b2 = ip[2]; b3 = ip[3]; b4 = ip[4]; b5 = ip[5]; b6 = ip[6];
-        auto canon = [](uint64_t v){ return (v & 0x0000FFFFFFFFFFFFULL); };
-        auto canon_se = [](uint64_t v)->uint64_t {
-            uint64_t lo48 = v & 0x0000FFFFFFFFFFFFULL;
-            return (lo48 & (1ULL<<47)) ? (lo48 | 0xFFFF000000000000ULL) : lo48;
-        };
+        PrintfQEMU("[gp] user GP: RIP=0x%lx ERR=0x%lx RCX=0x%llx RSP=0x%llx\n",
+                   regs->rip, regs->error_code, regs->rcx, regs->rsp);
+        PrintfQEMU("[gp regs] RAX=0x%llx RBX=0x%llx RCX=0x%llx RDX=0x%llx RSI=0x%llx RDI=0x%llx\n",
+                   regs->rax, regs->rbx, regs->rcx, regs->rdx, regs->rsi, regs->rdi);
+        PrintfQEMU("[gp regs] R8 =0x%llx R9 =0x%llx R10=0x%llx R11=0x%llx R12=0x%llx R13=0x%llx R14=0x%llx R15=0x%llx\n",
+                   regs->r8, regs->r9, regs->r10, regs->r11, regs->r12, regs->r13, regs->r14, regs->r15);
+        PrintfQEMU("[gp rbx diag] saved_in=0x%llx saved_out=0x%llx\n",
+                   (unsigned long long)dbg_saved_rbx_in, (unsigned long long)dbg_saved_rbx_out);
+        // Выведем FS селектор и базу (MSR IA32_FS_BASE), а также эффективный адрес для FS:[RCX]
+        uint64_t fs_base_lo, fs_base_hi, fs_base;
+        asm volatile("rdmsr" : "=a"(*(uint32_t*)&fs_base_lo), "=d"(*(uint32_t*)&fs_base_hi) : "c"(0xC0000100));
+        fs_base = (fs_base_hi << 32) | (fs_base_lo & 0xFFFFFFFFu);
+        uint16_t fs_sel; asm volatile("mov %%fs, %0" : "=r"(fs_sel));
+        uint64_t eff = fs_base + (uint64_t)regs->rcx;
+        PrintfQEMU("[gp fs] sel=0x%hx base=0x%llx eff(fs+rcx)=0x%llx\n",
+                   fs_sel, (unsigned long long)fs_base, (unsigned long long)eff);
+        // Дополнительная диагностика похожая на page fault: дамп окрестности RIP и вершины стека,
+        // стараемся читать только в ожидаемых user-диапазонах, чтобы не получить повторный PF
         extern uint64_t elf_last_load_base;
         extern uint64_t elf_last_brk_base;
-        auto rebase_elf = [&](uint64_t addr)->uint64_t{
-            uint64_t low48 = addr & 0x0000FFFFFFFFFFFFULL;
-            uint64_t cand = elf_last_load_base ? (elf_last_load_base + low48) : low48;
-            uint64_t lo = elf_last_load_base;
-            uint64_t hi = elf_last_brk_base ? elf_last_brk_base : (elf_last_load_base + 0x400000ULL);
-            if (cand >= lo && cand < hi) return cand;
-            return 0;
-        };
-        auto in_user_range = [&](uint64_t a)->bool{
-            uint64_t va = canon_se(a);
-            // ELF segs and brk window
+        auto in_user_range_simple = [&](uint64_t va)->bool{
+            uint64_t v = va;
             if (elf_last_load_base && elf_last_brk_base) {
-                if (va >= elf_last_load_base && va < (elf_last_brk_base + 0x100000ULL)) return true;
+                if (v >= elf_last_load_base && v < (elf_last_brk_base + 0x100000ULL)) return true;
             }
-            // ET_EXEC case: load_base==0 → код/данные обычно около 0x00400000..brk
             if (!elf_last_load_base && elf_last_brk_base) {
-                if (va >= 0x00400000ULL && va < (elf_last_brk_base + 0x100000ULL)) return true;
+                if (v >= 0x00400000ULL && v < (elf_last_brk_base + 0x100000ULL)) return true;
             }
-            // user stack near 0x30000000
-            if (va >= (0x30000000ULL - 0x02000000ULL) && va < 0x30000000ULL) return true;
-            // mmap window starting 0x40000000
-            if (va >= 0x40000000ULL && va < 0x80000000ULL) return true;
+            if (!elf_last_load_base && !elf_last_brk_base) {
+                if (v >= 0x00400000ULL && v < 0x04000000ULL) return true; // 4..64MB
+            }
+            if (v >= (0x30000000ULL - 0x02000000ULL) && v < 0x30000000ULL) return true; // near user stack
+            if (v >= 0x40000000ULL && v < 0x80000000ULL) return true; // mmap window
             return false;
         };
-        // REX.W + MOV r64, [mem]  (48 8B /r) — обработаем базовые моды адресации (включая RIP-relative)
-        if (b0 == 0x48 && b1 == 0x8B) {
-            auto rd_from_reg = [&](uint8_t code)->uint64_t&{
-                switch (code & 7) {
-                    case 0: return regs->rax; case 1: return regs->rcx; case 2: return regs->rdx; case 3: return regs->rbx;
-                    case 4: return regs->rsp; case 5: return regs->rbp; case 6: return regs->rsi; default: return regs->rdi;
-                }
-            };
-            uint8_t modrm = b2;
-            uint8_t mod = (modrm >> 6) & 3;
-            uint8_t reg = (modrm >> 3) & 7;
-            uint8_t rm  = modrm & 7;
-            uint64_t rip = regs->rip;
-            const uint8_t* p = ip + 3; // после modrm
-            uint64_t addr = 0;
-            bool have_addr = false;
-            int instr_len = 3; // 48 8B modrm
-            uint8_t sib = 0;
-            if (mod != 3) {
-                if (rm == 4) { // SIB
-                    sib = *p++; instr_len++;
-                }
-                int disp = 0; int disp_size = 0;
-                if (mod == 1) { disp = (int8_t)(*p++); disp_size = 1; instr_len++; }
-                else if (mod == 2) { disp = (int32_t)( (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24) ); p += 4; disp_size = 4; instr_len += 4; }
-                else if (mod == 0 && rm == 5) { // RIP-relative disp32
-                    int32_t d = (int32_t)( (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24) );
-                    p += 4; instr_len += 4;
-                    uint64_t next_ip = rip + instr_len;
-                    addr = next_ip + (int64_t)d;
-                    have_addr = true;
-                }
-                if (!have_addr) {
-                    uint64_t base_val = 0;
-                    uint64_t index_val = 0; int scale = 1;
-                    if (rm == 4) {
-                        uint8_t ss = (sib >> 6) & 3; uint8_t idx = (sib >> 3) & 7; uint8_t base = sib & 7;
-                        scale = 1 << ss;
-                        // index==4 означает отсутствие индекса
-                        if (idx != 4) index_val = rd_from_reg(idx);
-                        // base==5 и mod==0 трактуем как disp32 (уже обработали выше), иначе берём регистр
-                        if (!(mod == 0 && base == 5)) base_val = rd_from_reg(base);
-                    } else {
-                        base_val = rd_from_reg(rm);
-                    }
-                    addr = base_val + (uint64_t)disp + (uint64_t)(index_val * (uint64_t)scale);
-                    have_addr = true;
-                }
 
-                // Аккуратно: читаем только если адрес точно в юзер-диапазоне; RSP/RBP не трогаем
-                uint64_t eff = addr;
-                if (!in_user_range(eff)) {
-                    uint64_t reb = rebase_elf(eff);
-                    if (reb) eff = reb;
-                }
-                bool wrote = false;
-                if (in_user_range(eff) && reg != 4 /*RSP*/ && reg != 5 /*RBP*/) {
-                    uint64_t read_val = *(const uint64_t*)(uint64_t)eff;
-                    rd_from_reg(reg) = read_val;
-                    wrote = true;
-                }
-                PrintfQEMU("[gp] mov r64,[mem]: mod=%u rm=%u reg=%u addr=0x%llx -> set=%s\n",
-                           (unsigned)mod, (unsigned)rm, (unsigned)reg,
-                           (unsigned long long)eff,
-                           wrote?"yes":"no");
-                regs->rip += instr_len;
-                return;
-            }
+        // Печать нескольких байт вокруг RIP
+        if (in_user_range_simple((uint64_t)regs->rip)) {
+            const uint8_t* ip = (const uint8_t*)(uint64_t)regs->rip;
+            uint8_t code[32];
+            for (int i = 0; i < 32; ++i) code[i] = ip[i];
+            PrintfQEMU("[gp code] ");
+            for (int i = 0; i < 32; ++i) PrintfQEMU("%02x ", (unsigned)code[i]);
+            PrintfQEMU("\n");
+        } else {
+            PrintfQEMU("[gp code] RIP not in known user ranges, skipping code dump\n");
         }
 
-        // TEST r/m8, imm8  (F6 /0 ib)
-        if (b0 == 0xF6) {
-            uint8_t modrm = b1;
-            uint8_t ext = (modrm >> 3) & 7; // /0 .. /7
-            if (ext == 0) {
-                auto rd_from_reg = [&](uint8_t code)->uint64_t&{
-                    switch (code & 7) {
-                        case 0: return regs->rax; case 1: return regs->rcx; case 2: return regs->rdx; case 3: return regs->rbx;
-                        case 4: return regs->rsp; case 5: return regs->rbp; case 6: return regs->rsi; default: return regs->rdi;
-                    }
-                };
-                uint8_t mod = (modrm >> 6) & 3;
-                uint8_t rm  = modrm & 7;
-                const uint8_t* p = ip + 2; // после opcode+modrm
-                int instr_len = 2;
-                uint8_t sib = 0;
-                int disp = 0;
-                uint8_t imm = 0;
-                uint64_t addr = 0;
-                bool have_mem = false;
-                if (mod != 3) {
-                    if (rm == 4) { sib = *p++; instr_len++; }
-                    if (mod == 1) { disp = (int8_t)(*p++); instr_len++; }
-                    else if (mod == 2) { disp = (int32_t)( (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24) ); p += 4; instr_len += 4; }
-                    else if (mod == 0 && rm == 5) {
-                        // disp32 absolute (without RIP-rel in 64-bit for F6? трактуем как абсолютный)
-                        disp = (int32_t)( (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24) );
-                        p += 4; instr_len += 4;
-                        addr = (uint64_t)(int64_t)disp;
-                        have_mem = true;
-                    }
-                    if (!have_mem) {
-                        uint64_t base_val = 0, index_val = 0; int scale = 1;
-                        if (rm == 4) {
-                            uint8_t ss = (sib >> 6) & 3; uint8_t idx = (sib >> 3) & 7; uint8_t base = sib & 7;
-                            scale = 1 << ss;
-                            if (idx != 4) index_val = rd_from_reg(idx);
-                            if (!(mod == 0 && base == 5)) base_val = rd_from_reg(base);
-                        } else {
-                            base_val = rd_from_reg(rm);
-                        }
-                        addr = base_val + (uint64_t)disp + (uint64_t)(index_val * (uint64_t)scale);
-                        have_mem = true;
-                    }
-                    imm = *p++; instr_len++;
-
-                    // Пробуем безопасно прочитать байт, иначе считаем 0
-                    uint64_t eff = addr;
-                    if (!in_user_range(eff)) {
-                        uint64_t reb = rebase_elf(eff);
-                        if (reb) eff = reb;
-                    }
-                    uint8_t mval = 0;
-                    if (in_user_range(eff)) mval = *(const uint8_t*)(uint64_t)eff;
-                    uint8_t res = (uint8_t)(mval & imm);
-                    // Обновим ZF по результату (остальные флаги не трогаем)
-                    const uint64_t ZF = 1ULL << 6;
-                    if (res == 0) regs->rflags |= ZF; else regs->rflags &= ~ZF;
-                    PrintfQEMU("[gp] test r/m8,imm8: addr=0x%llx mval=0x%02x imm=0x%02x -> res=0x%02x ZF=%d\n",
-                               (unsigned long long)eff, (unsigned)mval, (unsigned)imm, (unsigned)res, (res==0));
-                    regs->rip += instr_len;
-                    return;
-                }
-                // mod==3: регистровый вариант — упрощённо: читаем AL/CL... через 64-бит рег и применяем к младшему байту
-                imm = *p++; instr_len++;
-                uint8_t mval = (uint8_t)(rd_from_reg(rm) & 0xFF);
-                uint8_t res = (uint8_t)(mval & imm);
-                const uint64_t ZF = 1ULL << 6;
-                if (res == 0) regs->rflags |= ZF; else regs->rflags &= ~ZF;
-                PrintfQEMU("[gp] test r8,imm8: reg=%u val=0x%02x imm=0x%02x -> res=0x%02x ZF=%d\n",
-                           (unsigned)rm, (unsigned)mval, (unsigned)imm, (unsigned)res, (res==0));
-                regs->rip += instr_len;
-                return;
+        // Печать нескольких слов со стека
+        if (in_user_range_simple((uint64_t)regs->rsp)) {
+            uint64_t* sp = (uint64_t*)(uint64_t)regs->rsp;
+            PrintfQEMU("[gp stack] ");
+            for (int i = 0; i < 8; ++i) {
+                uint64_t v = sp[i];
+                PrintfQEMU("0x%llx ", v);
             }
+            PrintfQEMU("\n");
         }
-        // HLT: эмулируем ожидание прерывания и пропускаем инструкцию
-        if (b0 == 0xF4) {
-            PrintfQEMU("[gp] emulate HLT at user RIP=0x%lx\n", regs->rip);
-            // Разрешим прерывания и усыпим ядро до ближайшего IRQ (например, PIT)
-            asm volatile("sti; hlt");
-            regs->rip += 1;
-            return;
+        thread_t* user = thread_get_current_user();
+        if (user) {
+            thread_stop((int)user->tid);
+            thread_set_current_user(nullptr);
         }
-        // UD2 (0F 0B)
-        if (b0 == 0x0F && b1 == 0x0B) { PrintfQEMU("[gp] skip UD2 at user RIP=0x%lx\n", regs->rip); regs->rip += 2; return; }
-        // INT3 (CC)
-        if (b0 == 0xCC) { PrintfQEMU("[gp] skip INT3 at user RIP=0x%lx\n", regs->rip); regs->rip += 1; return; }
-        // ICEBP (F1)
-        if (b0 == 0xF1) { PrintfQEMU("[gp] skip ICEBP at user RIP=0x%lx\n", regs->rip); regs->rip += 1; return; }
-        // REP MOVSB (F3 A4) — безопасная эмуляция без записи в память (чтобы не портить стек/TCB)
-        if (b0 == 0xF3 && b1 == 0xA4) {
-            uint64_t count = regs->rcx;
-            if (count) {
-                uint64_t rsi_can = canon_se(regs->rsi);
-                uint64_t rdi_can = canon_se(regs->rdi);
-                int df = (regs->rflags & (1ULL << 10)) ? 1 : 0; // DF флаг
-                // Безопасно сдвигаем указатели, запись не производим
-                    if (!df) { regs->rsi += count; regs->rdi += count; }
-                    else { regs->rsi -= count; regs->rdi -= count; }
-                PrintfQEMU("[gp] rep movsb: len=%llu (no-store)\n", (unsigned long long)count);
-                regs->rcx = 0;
-            }
-            regs->rip += 2;
-            return;
-        }
-        // MOV r13b,(r12) — без записи (skip store), только продвигаем RIP
-        if (b0 == 0x45 && b1 == 0x88 && b2 == 0x2C && b3 == 0x24) {
-            PrintfQEMU("[gp] skip mov r13b,(r12) (no-store)\n");
-            regs->rip += 4;
-            return;
-        }
-        // MOVB imm8,(r12): 41 C6 04 24 xx — no-store
-        if (b0 == 0x41 && b1 == 0xC6 && b2 == 0x04 && b3 == 0x24) {
-            PrintfQEMU("[gp] skip movb imm,(r12) (no-store)\n");
-            regs->rip += 5;
-            return;
-        }
-        // Диагностика: печать первых байт и RBP
-        PrintfQEMU("[gp] ring3 GP at RIP=0x%lx op=%02x %02x RBP=0x%llx\n",
-                   regs->rip, b0, b1, (unsigned long long)regs->rbp);
+        for(;;){ thread_yield(); }
     }
-    // иначе — как раньше: лог и стоп
-    PrintfQEMU("General protection fault\n");
-    PrintfQEMU("Error code: 0x%lx\n", regs->error_code);
-    PrintfQEMU("RIP: 0x%lx\n", regs->rip);
-    PrintfQEMU("RSP: 0x%lx\n", regs->rsp);
-    PrintfQEMU("GPR: RAX=0x%llx RBX=0x%llx RCX=0x%llx RDX=0x%llx RSI=0x%llx RDI=0x%llx R8=0x%llx R9=0x%llx R10=0x%llx R11=0x%llx R12=0x%llx R13=0x%llx R14=0x%llx R15=0x%llx\n",
-               regs->rax, regs->rbx, regs->rcx, regs->rdx, regs->rsi, regs->rdi,
-               regs->r8, regs->r9, regs->r10, regs->r11, regs->r12, regs->r13, regs->r14, regs->r15);
+    // kernel GP — стоп
+    PrintfQEMU("General protection fault in kernel\n");
+    PrintfQEMU("Error code: 0x%lx RIP=0x%lx RSP=0x%lx\n", regs->error_code, regs->rip, regs->rsp);
     for(;;);
 }
 

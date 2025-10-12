@@ -171,7 +171,7 @@ int elf64_load_process(const char* path, uint64_t user_stack_size,
     PrintfQEMU("[elf] open ok: file=%p\n", f);
 
     // Read ELF header
-    Elf64_Ehdr eh{};
+    Elf64_Ehdr eh; // инициализируется чтением ниже
     if (fs_read(f, &eh, sizeof(eh)) != (int)sizeof(eh)) { fs_close(f); asm volatile("push %0; popfq"::"r"(saved_rflags):"memory"); return -1; }
     if (!(eh.e_ident[EI_MAG0]==ELFMAG0 && eh.e_ident[EI_MAG1]==ELFMAG1 && eh.e_ident[EI_MAG2]==ELFMAG2 && eh.e_ident[EI_MAG3]==ELFMAG3)) { fs_close(f); asm volatile("push %0; popfq"::"r"(saved_rflags):"memory"); return -1; }
     if (eh.e_ident[EI_CLASS] != ELFCLASS64 || eh.e_ident[EI_DATA] != ELFDATA2LSB) { fs_close(f); asm volatile("push %0; popfq"::"r"(saved_rflags):"memory"); return -1; }
@@ -213,6 +213,13 @@ int elf64_load_process(const char* path, uint64_t user_stack_size,
         PrintfQEMU("[elf] PH[%d]: off=%llu vaddr=0x%llx filesz=%llu memsz=%llu flags=0x%x\n",
                    i, (unsigned long long)ph->p_offset, (unsigned long long)ph->p_vaddr,
                    (unsigned long long)ph->p_filesz, (unsigned long long)ph->p_memsz, (unsigned)ph->p_flags);
+        // Дополнительный лог: ожидаемый VA диапазон и предполагаемый mapping size
+        uint64_t dbg_seg_va = load_base + ph->p_vaddr;
+        uint64_t dbg_va_start = dbg_seg_va & ~0xFFFULL;
+        uint64_t dbg_va_end = ((dbg_seg_va + ((ph->p_memsz>ph->p_filesz)?ph->p_memsz:ph->p_filesz)) + 0xFFFULL) & ~0xFFFULL;
+        PrintfQEMU("[elf dbg] segment mapped VA: start=0x%llx end=0x%llx pages=%llu\n",
+                   (unsigned long long)dbg_va_start, (unsigned long long)dbg_va_end,
+                   (unsigned long long)((dbg_va_end - dbg_va_start)/0x1000ULL));
 
         uint64_t seg_size = (ph->p_filesz > ph->p_memsz) ? ph->p_filesz : ph->p_memsz;
         uint64_t seg_va   = load_base + ph->p_vaddr;
@@ -220,11 +227,20 @@ int elf64_load_process(const char* path, uint64_t user_stack_size,
         uint64_t va_end   = (seg_va + seg_size + 0xFFFULL) & ~0xFFFULL;
         uint64_t map_size = va_end - va_start;
 
-        uint64_t flags = PAGE_PRESENT | PAGE_USER | PAGE_WRITABLE;
+        // Set flags conservatively: code segments readonly, data segments writable
+        uint64_t flags = PAGE_PRESENT | PAGE_USER;
+        if (ph->p_flags & 0x1) { // PF_X - executable
+            // keep writable off for code pages
+        }
+        if (ph->p_flags & 0x2) { // PF_W - writable
+            flags |= PAGE_WRITABLE;
+        }
         for (uint64_t off = 0; off < map_size; off += 0x1000ULL) {
             void* page = elf_alloc_page4k();
             if (!page) page = kmalloc_aligned(0x1000, 0x1000);
             if (!page) { kfree(ph_buf); fs_close(f); asm volatile("push %0; popfq"::"r"(saved_rflags):"memory"); return -1; }
+            // Previously attempted to set PAGE_NX for non-executable pages, but some platforms
+            // may fault if NX is not enabled. Map with the computed flags without NX here.
             paging_map_page(va_start + off, (uint64_t)page, flags);
         }
 
@@ -247,6 +263,21 @@ int elf64_load_process(const char* path, uint64_t user_stack_size,
                 size_t want = (remaining > CHUNK) ? CHUNK : (size_t)remaining;
                 int rr = fs_read(fseg, kbuf_static, want);
                 if (rr <= 0) { fs_close(fseg); kfree(ph_buf); fs_close(f); asm volatile("push %0; popfq"::"r"(saved_rflags):"memory"); return -1; }
+                // Safety: ensure dst is within mapped segment range before writing
+                uint64_t dst_va = (uint64_t)dst;
+                if (dst_va < va_start || dst_va + (uint64_t)rr > va_end) {
+                    PrintfQEMU("[elf] WARNING: write out of mapped segment for %s seg=%d dst=0x%llx rr=%d va_start=0x%llx va_end=0x%llx\n",
+                               path, i, (unsigned long long)dst_va, rr, (unsigned long long)va_start, (unsigned long long)va_end);
+                    // Clamp write to mapped area
+                    if (dst_va < va_start) { fs_close(fseg); kfree(ph_buf); fs_close(f); asm volatile("push %0; popfq"::"r"(saved_rflags):"memory"); return -1; }
+                    size_t maxwrite = (size_t)(va_end - dst_va);
+                    if (maxwrite == 0) { fs_close(fseg); kfree(ph_buf); fs_close(f); asm volatile("push %0; popfq"::"r"(saved_rflags):"memory"); return -1; }
+                    size_t tw = (size_t)rr; if (tw > maxwrite) tw = maxwrite;
+                    memcpy(dst, kbuf_static, tw);
+                    dst += tw;
+                    remaining -= tw;
+                    break; // cannot write further
+                }
                 memcpy(dst, kbuf_static, (size_t)rr);
                 dst += (size_t)rr;
                 remaining -= (uint64_t)rr;
@@ -256,14 +287,17 @@ int elf64_load_process(const char* path, uint64_t user_stack_size,
         if (ph->p_memsz > ph->p_filesz) {
             uint64_t bss_start = load_base + ph->p_vaddr + ph->p_filesz;
             uint64_t bss_len   = ph->p_memsz - ph->p_filesz;
-            memset((void*)(uintptr_t)bss_start, 0, bss_len);
+            // Заполняем нулями безопасно, не полагаясь на SSE-опкоды компилятора
+            volatile unsigned char* pz = (volatile unsigned char*)(uintptr_t)bss_start;
+            for (uint64_t i = 0; i < bss_len; ++i) pz[i] = 0;
         }
         uint64_t seg_end = load_base + ph->p_vaddr + ph->p_memsz;
         if (seg_end > max_load_end) max_load_end = seg_end;
     }
 
-    // Если это PIE (ET_DYN), применим базовые релокации R_X86_64_RELATIVE из PT_DYNAMIC
-    if (eh.e_type == 3 /*ET_DYN*/){
+    // Применим базовые релокации R_X86_64_* из PT_DYNAMIC как для PIE (ET_DYN), так и для ET_EXEC:
+    // статические бинарники тоже нередко содержат .rela.dyn c ABS/RELATIVE.
+    {
         uint64_t dyn_vaddr = 0, dyn_memsz = 0;
         for (int i = 0; i < eh.e_phnum; ++i) {
             Elf64_Phdr* ph = (Elf64_Phdr*)((uint8_t*)ph_buf + i * eh.e_phentsize);
@@ -285,6 +319,9 @@ int elf64_load_process(const char* path, uint64_t user_stack_size,
                 else if (d->d_tag == DT_RELRSZ)  relrsz  = d->d_un.d_val;
                 else if (d->d_tag == DT_RELRENT) relrent = d->d_un.d_val;
             }
+            // Compute safe mapped region for relocation writes
+            uint64_t map_region_start = load_base + (min_ptload_vaddr==~0ULL?0:min_ptload_vaddr);
+            uint64_t map_region_end = (max_load_end + 0xFFFULL) & ~0xFFFULL;
             if (rela && relasz && relaent && (relaent == sizeof(Elf64_Rela))){
                 uint64_t count = relasz / relaent;
                 Elf64_Rela* rel = (Elf64_Rela*)(uintptr_t)(load_base + rela);
@@ -293,12 +330,22 @@ int elf64_load_process(const char* path, uint64_t user_stack_size,
                     if (type == R_X86_64_RELATIVE){
                         uint64_t* where = (uint64_t*)(uintptr_t)(load_base + rel[i].r_offset);
                         uint64_t  val   = load_base + (uint64_t)rel[i].r_addend;
-                        *where = val;
+                        uint64_t where_va = (uint64_t)(uintptr_t)where;
+                        if (where_va >= map_region_start && (where_va + sizeof(uint64_t)) <= map_region_end) {
+                            *where = val;
+                        } else {
+                            PrintfQEMU("[elf] SKIP relo RELATIVE out-of-range where=0x%llx val=0x%llx\n", (unsigned long long)where_va, (unsigned long long)val);
+                        }
                     } else if (type == R_X86_64_64 || type == R_X86_64_GLOB_DAT) {
                         // Для статического PIE трактуем как base+addend
                         uint64_t* where = (uint64_t*)(uintptr_t)(load_base + rel[i].r_offset);
                         uint64_t  val   = load_base + (uint64_t)rel[i].r_addend;
-                        *where = val;
+                        uint64_t where_va = (uint64_t)(uintptr_t)where;
+                        if (where_va >= map_region_start && (where_va + sizeof(uint64_t)) <= map_region_end) {
+                            *where = val;
+                        } else {
+                            PrintfQEMU("[elf] SKIP relo 64/GLOB out-of-range where=0x%llx val=0x%llx\n", (unsigned long long)where_va, (unsigned long long)val);
+                        }
                     }
                 }
             }
@@ -310,12 +357,22 @@ int elf64_load_process(const char* path, uint64_t user_stack_size,
                     if (type == R_X86_64_RELATIVE){
                         uint64_t* where = (uint64_t*)(uintptr_t)(load_base + rr[i].r_offset);
                         // addend хранится по адресу where
-                        uint64_t addend = *where;
-                        *where = load_base + addend;
+                        uint64_t where_va = (uint64_t)(uintptr_t)where;
+                        if (where_va >= map_region_start && (where_va + sizeof(uint64_t)) <= map_region_end) {
+                            uint64_t addend = *where;
+                            *where = load_base + addend;
+                        } else {
+                            PrintfQEMU("[elf] SKIP relo REL out-of-range where=0x%llx\n", (unsigned long long)where_va);
+                        }
                     } else if (type == R_X86_64_64 || type == R_X86_64_GLOB_DAT) {
                         uint64_t* where = (uint64_t*)(uintptr_t)(load_base + rr[i].r_offset);
-                        uint64_t addend = *where;
-                        *where = load_base + addend;
+                        uint64_t where_va = (uint64_t)(uintptr_t)where;
+                        if (where_va >= map_region_start && (where_va + sizeof(uint64_t)) <= map_region_end) {
+                            uint64_t addend = *where;
+                            *where = load_base + addend;
+                        } else {
+                            PrintfQEMU("[elf] SKIP relo 64/GLOB out-of-range where=0x%llx\n", (unsigned long long)where_va);
+                        }
                     }
                 }
             }
@@ -330,14 +387,24 @@ int elf64_load_process(const char* path, uint64_t user_stack_size,
                         base_addr = load_base + e;
                         // сам адрес тоже подвергается относительной релокации
                         uint64_t* where = (uint64_t*)(uintptr_t)base_addr;
-                        *where = *where + load_base;
+                        uint64_t where_va = (uint64_t)(uintptr_t)where;
+                        if (where_va >= map_region_start && (where_va + sizeof(uint64_t)) <= map_region_end) {
+                            *where = *where + load_base;
+                        } else {
+                            PrintfQEMU("[elf] SKIP relr base out-of-range where=0x%llx\n", (unsigned long long)where_va);
+                        }
                     } else {
                         // bitmap: биты 1..63 соответствуют последующим словам
                         uint64_t mask = e;
                         for (uint64_t bit = 1; bit < 64; ++bit){
                             if (mask & (1ULL << bit)){
                                 uint64_t* where = (uint64_t*)(uintptr_t)(base_addr + bit * 8ULL);
-                                *where = *where + load_base;
+                                uint64_t where_va = (uint64_t)(uintptr_t)where;
+                                if (where_va >= map_region_start && (where_va + sizeof(uint64_t)) <= map_region_end) {
+                                    *where = *where + load_base;
+                                } else {
+                                    PrintfQEMU("[elf] SKIP relr bitmap out-of-range where=0x%llx bit=%llu\n", (unsigned long long)where_va, (unsigned long long)bit);
+                                }
                             }
                         }
                         base_addr += 64ULL * 8ULL;
@@ -404,7 +471,18 @@ int elf64_load_process(const char* path, uint64_t user_stack_size,
         PrintfQEMU("[elf] WARN: at_entry==0, fallback to first/min PT_LOAD: 0x%llx\n",
                    (unsigned long long)elf_last_at_entry);
     }
-    elf_last_load_base = load_base;
+    // For ET_EXEC load_base==0 but PT_LOAD vaddrs are absolute; prefer using first PT_LOAD vaddr
+    if (load_base) elf_last_load_base = load_base;
+    else elf_last_load_base = have_first ? first_load_vaddr : (min_ptload_vaddr==~0ULL?0:min_ptload_vaddr);
+    // Dump small memory window around elf_last_load_base/elf_last_brk_base for post-mortem
+    PrintfQEMU("[elf dbg] elf_last_load_base=0x%llx elf_last_brk_base=0x%llx\n",
+               (unsigned long long)elf_last_load_base, (unsigned long long)elf_last_brk_base);
+    if (elf_last_load_base) {
+        const unsigned char* p = (const unsigned char*)(uintptr_t)(elf_last_load_base & ~0xFFFULL);
+        PrintfQEMU("[elf mem] first 32 bytes at page_of_load_base: ");
+        for (int i=0;i<32;i++) PrintfQEMU("%02x ", p[i]);
+        PrintfQEMU("\n");
+    }
     // brk: конец PT_LOAD, выровненный по странице
     if (max_load_end) {
         elf_last_brk_base = (max_load_end + 0xFFFULL) & ~0xFFFULL;

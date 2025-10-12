@@ -29,27 +29,70 @@ void heap_init() {
 
         // Construct allocator with placement-new
         new (g_heap) HeapAllocator(heap_data, heap_size);
-            
-            PrintfQEMU("Heap initialized with %llu bytes available\n", (unsigned long long)heap_size);
+        PrintfQEMU("Heap initialized with %llu bytes available\n", (unsigned long long)heap_size);
+        PrintfQEMU("[heap init] g_heap=%p heap_data=%p heap_size=0x%llx sizeof(HeapAllocator)=%zu\n",
+                   (void*)g_heap, (void*)heap_data, (unsigned long long)heap_size, (size_t)sizeof(HeapAllocator));
+        if (g_heap) {
+            PrintfQEMU("[heap init] heap_mem_start=%p heap_mem_end=%p heap_start=%p heap_start->size=%zu\n",
+                       (void*)g_heap->heap_mem_start, (void*)g_heap->heap_mem_end,
+                       (void*)g_heap->heap_start, (size_t)(g_heap->heap_start?g_heap->heap_start->size:0));
+        }
         initialized = true;
+    }
+}
+
+// Allocation history for debugging (circular buffer)
+static struct {
+    size_t size;
+    void* ptr;
+    void* caller;
+} alloc_history[64];
+static int alloc_hist_idx = 0;
+
+extern "C" void dump_heap_info();
+
+static void record_alloc(size_t size, void* ptr, void* caller) {
+    alloc_history[alloc_hist_idx].size = size;
+    alloc_history[alloc_hist_idx].ptr = ptr;
+    alloc_history[alloc_hist_idx].caller = caller;
+    alloc_hist_idx = (alloc_hist_idx + 1) % (int)(sizeof(alloc_history)/sizeof(alloc_history[0]));
+}
+
+extern "C" void dump_alloc_history(void) {
+    PrintfQEMU("[alloc_hist] last allocations:\n");
+    int n = (int)(sizeof(alloc_history)/sizeof(alloc_history[0]));
+    int i = alloc_hist_idx;
+    for (int k = 0; k < n; ++k) {
+        i = (i - 1 + n) % n;
+        if (alloc_history[i].ptr == nullptr && alloc_history[i].size == 0) continue;
+        PrintfQEMU("[alloc_hist] #%d size=%zu ptr=%p caller=%p\n", k, alloc_history[i].size, alloc_history[i].ptr, alloc_history[i].caller);
     }
 }
 
 // Heap allocation wrapper for kernel use
 void* kmalloc(size_t size) {
     void* p = g_heap ? g_heap->malloc(size) : nullptr;
-    // PrintfQEMU("[heap.api] kmalloc(%zu) -> %p\n", size, p);
+    // Log allocation with return address (caller) for debugging
+    void* ra = __builtin_return_address(0);
+    // Уменьшаем шум логов и избегаем огромных дампов, которые могут «вешать» консоль
+    // logging disabled to avoid boot-time stalls on slow consoles
+    record_alloc(size, p, ra);
     return p;
 }
 
 void* kmalloc_aligned(size_t size, size_t alignment) {
+    PrintfQEMU("[heap_init] kmalloc_aligned: size=%zu alignment=%zu\n", size, alignment);
     void* p = g_heap ? g_heap->malloc_aligned(size, alignment) : nullptr;
-    // PrintfQEMU("[heap.api] kmalloc_aligned(%zu,%zu) -> %p\n", size, alignment, p);
+    void* ra = __builtin_return_address(0);
+    PrintfQEMU("[heap_init] kmalloc_aligned: result=%p caller=%p\n", p, ra);
+    // logging disabled to avoid boot-time stalls on slow consoles
+    record_alloc(size, p, ra);
     return p;
 }
 
 void kfree(void* ptr) {
-    // PrintfQEMU("[heap.api] kfree(%p)\n", ptr);
+    void* ra = __builtin_return_address(0);
+    PrintfQEMU("[alloc] kfree ptr=%p caller=%p\n", ptr, ra);
     if (g_heap) g_heap->mfree(ptr);
 }
 

@@ -67,7 +67,9 @@ public:
         unsigned long long x = static_cast<unsigned long long>(size - 1);
         const size_t bits = sizeof(unsigned long long) * 8;
         size_t leading = __builtin_clzll(x);
-        return (bits - 1) - leading;
+        size_t bucket = (bits - 1) - leading;
+        // PrintfQEMU("[heap] get_bucket_index: size=%zu -> bucket=%zu\n", size, bucket);
+        return bucket;
     }
     
     // Merge adjacent free blocks

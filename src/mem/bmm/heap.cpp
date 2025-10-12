@@ -77,6 +77,8 @@ void HeapAllocator::add_to_free_list(heap_block_header* block) {
     size_t bucket = get_bucket_index(block->size);
     if (bucket >= NUM_BUCKETS) return;
     
+    // PrintfQEMU("[heap] add_to_free_list: block=%p size=%zu bucket=%zu\n", block, block->size, bucket);
+    
     // Insert at head for better cache performance
     block->next = free_lists[bucket];
     block->prev = nullptr;
@@ -112,7 +114,7 @@ void HeapAllocator::remove_from_free_list(heap_block_header* block) {
 // Find best fit block in free list using binary search optimization
 heap_block_header* HeapAllocator::find_best_fit(size_t size) {
     size_t bucket = get_bucket_index(size);
-    //PrintfQEMU("[heap] find_best_fit: request=%zu bucket=%zu\n", size, bucket);
+    // PrintfQEMU("[heap] find_best_fit: request=%zu bucket=%zu\n", size, bucket);
     
     if (bucket >= NUM_BUCKETS) {
         bucket = NUM_BUCKETS - 1;
@@ -127,16 +129,22 @@ heap_block_header* HeapAllocator::find_best_fit(size_t size) {
     // Search in current bucket first
     for (size_t b = bucket; b < NUM_BUCKETS; b++) {
         heap_block_header* head = free_lists[b];
+        int count = 0;
         while (head) {
+            count++;
             if (!is_header_within_heap(head)) {
                 // corrupted list; stop scanning this bucket to avoid faults
                 break;
             }
             if (validate_block(head) && head->is_free && head->size >= size) {
+                // PrintfQEMU("[heap] find_best_fit: found block=%p size=%zu in bucket=%zu\n", head, head->size, b);
                 return head;
             }
             head = head->next;
         }
+        // if (count > 0) {
+        //     PrintfQEMU("[heap] find_best_fit: bucket=%zu has %d blocks, none suitable\n", b, count);
+        // }
     }
     
     // If not found, try smaller buckets
@@ -195,6 +203,9 @@ heap_block_header* HeapAllocator::split_block(heap_block_header* block, size_t r
     
     return block;
 }
+
+// Size of post-allocation canary
+static const size_t CANARY_SIZE = sizeof(uint64_t);
 
 // Merge adjacent free blocks (optimized for minimal overhead)
 void HeapAllocator::merge_blocks(heap_block_header* block) {
@@ -255,7 +266,22 @@ void HeapAllocator::merge_blocks(heap_block_header* block) {
 
 // Validate block integrity
 bool HeapAllocator::validate_block(const heap_block_header* block) const {
-    return block && block->magic == MAGIC_NUMBER;
+    if (!block) return false;
+    if (block->magic != MAGIC_NUMBER) {
+        PrintfQEMU("[heap VALIDATE] bad magic: block=%p magic=0x%08x expected=0x%08x\n",
+                   block, block->magic, MAGIC_NUMBER);
+        // Dump nearby memory for diagnosis (preserve const)
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(block) - 32;
+        PrintfQEMU("[heap VALIDATE] nearby: "); for (int i=0;i<96;i++) PrintfQEMU("%02x ", p[i]); PrintfQEMU("\n");
+        return false;
+    }
+    // Basic range check
+    const uint8_t* bptr = reinterpret_cast<const uint8_t*>(block);
+    if (bptr < heap_mem_start || bptr > heap_mem_end) {
+        PrintfQEMU("[heap VALIDATE] block out of range: block=%p heap_start=%p heap_end=%p\n", block, heap_mem_start, heap_mem_end);
+        return false;
+    }
+    return true;
 }
 
 // Expand heap by requesting more memory from physical memory manager
@@ -268,7 +294,9 @@ bool HeapAllocator::expand_heap(size_t additional_size) {
     // This would integrate with your PMM system
     void* new_memory = nullptr; // pmm_alloc_pages(pages_needed);
     
-    if (!new_memory) return false;
+    // Temporarily disable heap expansion to avoid hangs
+    PrintfQEMU("[heap] expand_heap disabled: request=%zu pages=%zu\n", additional_size, pages_needed);
+    return false;
     
     // Map the new memory
     uint64_t virtual_addr = reinterpret_cast<uint64_t>(heap_end) + sizeof(heap_block_header) + heap_end->size;
@@ -345,12 +373,22 @@ void* HeapAllocator::malloc_aligned(size_t size, size_t alignment) {
     // Calculate required size including alignment overhead
     size_t required_size = size + alignment - 1 + sizeof(heap_block_header);
     
+    PrintfQEMU("[heap] malloc_aligned: size=%zu alignment=%zu required=%zu\n", size, alignment, required_size);
+    
     // Allocate larger block
     heap_block_header* block = find_best_fit(required_size);
     if (!block) {
-        if (!expand_heap(required_size)) return nullptr;
+        PrintfQEMU("[heap] malloc_aligned: no block found for %zu bytes\n", required_size);
+        // Try to expand heap
+        if (!expand_heap(required_size)) {
+            PrintfQEMU("[heap] malloc_aligned: expand_heap failed for %zu bytes\n", required_size);
+            return nullptr;
+        }
         block = find_best_fit(required_size);
-        if (!block) return nullptr;
+        if (!block) {
+            PrintfQEMU("[heap] malloc_aligned: still no block after expansion\n");
+            return nullptr;
+        }
     }
     
     // Remove from free list
@@ -432,16 +470,19 @@ void HeapAllocator::mfree(void* ptr) {
     
     if (!is_valid_pointer(ptr)) { /*PrintfQEMU("[heap] kfree: invalid ptr=%p\n", ptr); */ return; }
     
+    // Compute header address from user pointer
     heap_block_header* block = reinterpret_cast<heap_block_header*>(
         reinterpret_cast<uint8_t*>(ptr) - sizeof(heap_block_header)
     );
     
     if (!validate_block(block)) { /* //PrintfQEMU("[heap] kfree: bad magic for ptr=%p\n", ptr); */ return; }
     
+    // For now no canary check (removed) — keep placeholder for future instrumentation
+
     // Update statistics
     stats.total_freed += block->size;
     stats.current_used -= block->size;
-    
+
     // Mark as free
     block->is_free = 1;
     //PrintfQEMU("[heap] kfree: ptr=%p block=%p size=%zu\n", ptr, block, block->size);
