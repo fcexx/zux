@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 
+// We're using cpp lol so i dont know the purpose of this
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -10,6 +11,7 @@ void PrintfQEMU(const char* fmt, ...);
 }
 #endif
 
+// Some port kernel funcs
 void outb(uint16_t port, uint8_t val);
 uint8_t inb(uint16_t port);
 void outw(uint16_t port, uint16_t val);

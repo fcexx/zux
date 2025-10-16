@@ -5,26 +5,26 @@
 #include <idt.h>
 
 // PIT ports
-#define PIT_CHANNEL0    0x40
-#define PIT_COMMAND     0x43
+#define PIT_CHANNEL0            0x40
+#define PIT_COMMAND             0x43
 
 // PIT command byte
-#define PIT_CMD_CHANNEL0    0x00
-#define PIT_CMD_ACCESS_LO   0x10
-#define PIT_CMD_ACCESS_HI   0x20
-#define PIT_CMD_ACCESS_BOTH 0x30
-#define PIT_CMD_MODE0       0x00  // Interrupt on terminal count
-#define PIT_CMD_MODE2       0x04  // Rate generator
-#define PIT_CMD_MODE3       0x06  // Square wave generator
-#define PIT_CMD_MODE4       0x08  // Software triggered strobe
-#define PIT_CMD_MODE5       0x0A  // Hardware triggered strobe
-#define PIT_CMD_BINARY      0x00
-#define PIT_CMD_BCD         0x01
+#define PIT_CMD_CHANNEL0        0x00
+#define PIT_CMD_ACCESS_LO       0x10
+#define PIT_CMD_ACCESS_HI       0x20
+#define PIT_CMD_ACCESS_BOTH     0x30
+#define PIT_CMD_MODE0           0x00  // interrupt on terminal count
+#define PIT_CMD_MODE2           0x04  // rate generator
+#define PIT_CMD_MODE3           0x06  // square wave generator
+#define PIT_CMD_MODE4           0x08  // software triggered strobe
+#define PIT_CMD_MODE5           0x0A  // hardware triggered strobe
+#define PIT_CMD_BINARY          0x00
+#define PIT_CMD_BCD             0x01
 
 // PIT frequency (1193180 Hz)
-#define PIT_FREQUENCY    1193180
+#define PIT_FREQUENCY           1193180
 
-// Function declarations
+// function declarations
 void pit_init();
 void pit_set_frequency(uint32_t frequency);
 void pit_set_divisor(uint16_t divisor);
@@ -35,7 +35,7 @@ uint64_t pit_get_ticks();
 uint64_t pit_get_time_ms();
 uint64_t pit_get_frequency();
 
-// Global variables
+// global variables
 extern volatile uint64_t pit_ticks;
 extern volatile uint32_t pit_frequency;
 

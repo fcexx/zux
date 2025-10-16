@@ -70,7 +70,9 @@ clean:
 	sudo rm -rf $(BUILDDIR) entix.iso
 
 run:
-	@qemu-system-x86_64 -cdrom entix.iso -m 256M -debugcon stdio -hda ../hda.img -boot d
+	@qemu-system-x86_64 -cdrom entix.iso -m 1024M -debugcon stdio -hda ../hda.img -boot d
+run-uefi:
+	@qemu-system-x86_64 -cdrom entix.iso -m 1024M -debugcon stdio -hda ../hda.img -boot d -vga virtio -bios /usr/share/OVMF/OVMF_CODE.fd
 
 debug:
 	qemu-system-x86_64 -cdrom entix.iso -m 512M -s -S -debugcon stdio

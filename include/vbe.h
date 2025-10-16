@@ -10,19 +10,24 @@
 void vbe_init(uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch, uint32_t bpp);
 void vbe_shutdown();
 void vbe_swap();
+// allow/disallow frame from PIT (protective flag early initialization)
+// like a spinlock
+void vbe_set_present_enabled(int enable);
 void vbe_pixel(int x, int y, uint32_t color);
 void vbe_clear(uint32_t color);
 void vbe_fill_rect(int x, int y, int width, int height, uint32_t color);
 
 // Utility functions
 bool vbe_is_initialized();
+// true when text VBE console is ready (has backbuffer)
+bool vbe_console_ready();
 uint32_t vbe_get_width();
 uint32_t vbe_get_height();
 uint32_t vbe_get_pitch();
 uint32_t vbe_get_bpp();
 uint64_t vbe_get_addr();
 
-// VBE console (text) API — 16-color palette over 32-bit framebuffer with double buffering
+// VBE console (text) API - 16-color palette over 32-bit framebuffer with double buffering
 void vbec_init_console();
 void vbec_set_palette_entry(uint8_t idx, uint8_t r, uint8_t g, uint8_t b);
 void vbec_set_fg(uint8_t idx);

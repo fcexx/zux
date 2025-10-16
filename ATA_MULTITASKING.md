@@ -16,17 +16,17 @@
 
 ```c
 typedef struct {
-    uint8_t present;
-    uint8_t type;
-    uint32_t sectors;
-    uint32_t size;      
-    char name[40];        
-    char vendor[40];
-    char serial[20];
-    ata_mode_t mode;        // PIO или DMA
-    ata_op_status_t status; // Текущий статус операции
-    uint8_t* dma_buffer;    // DMA буфер (если доступен)
-    uint32_t dma_buffer_size;
+        uint8_t present;
+        uint8_t type;
+        uint32_t sectors;
+        uint32_t size;          
+        char name[40];                
+        char vendor[40];
+        char serial[20];
+        ata_mode_t mode;                // PIO или DMA
+        ata_op_status_t status; // Текущий статус операции
+        uint8_t* dma_buffer;        // DMA буфер (если доступен)
+        uint32_t dma_buffer_size;
 } ata_drive_t;
 ```
 
@@ -67,7 +67,7 @@ uint8_t buffer[512];
 
 // Синхронное чтение
 if (ata_read_sector(0, 0, buffer) == 0) {
-    kprintf("Сектор 0 прочитан успешно\n");
+        kprintf("Сектор 0 прочитан успешно\n");
 }
 ```
 
@@ -94,23 +94,23 @@ kprintf("Все операции завершены\n");
 
 ```c
 void disk_worker_thread() {
-    uint8_t buffer[512];
-    
-    while (1) {
-        // Запускаем асинхронное чтение
-        if (ata_read_sector_async(0, current_sector, buffer) == 0) {
-            // Пока читается диск, можем обрабатывать данные
-            process_data();
-            
-            // Ждем завершения операции
-            ata_wait_completion(0);
-            
-            // Обрабатываем прочитанные данные
-            handle_disk_data(buffer);
-        }
+        uint8_t buffer[512];
         
-        current_sector++;
-    }
+        while (1) {
+                // Запускаем асинхронное чтение
+                if (ata_read_sector_async(0, current_sector, buffer) == 0) {
+                        // Пока читается диск, можем обрабатывать данные
+                        process_data();
+                        
+                        // Ждем завершения операции
+                        ata_wait_completion(0);
+                        
+                        // Обрабатываем прочитанные данные
+                        handle_disk_data(buffer);
+                }
+                
+                current_sector++;
+        }
 }
 ```
 
@@ -136,9 +136,9 @@ ata_wait_completion(0);
 ```c
 // Поток может выполнять другие задачи во время ожидания
 while (ata_poll_status(0) == 1) {
-    // Выполняем другие задачи
-    process_background_tasks();
-    thread_yield();
+        // Выполняем другие задачи
+        process_background_tasks();
+        thread_yield();
 }
 ```
 
@@ -149,12 +149,12 @@ while (ata_poll_status(0) == 1) {
 ```c
 // Запускаем несколько операций
 for (int i = 0; i < 4; i++) {
-    ata_read_sector_async(0, i, buffers[i]);
+        ata_read_sector_async(0, i, buffers[i]);
 }
 
 // Ждем завершения всех операций
 for (int i = 0; i < 4; i++) {
-    ata_wait_completion(0);
+        ata_wait_completion(0);
 }
 ```
 
@@ -204,8 +204,8 @@ kprintf("ATA: Operation completed\n");
 ```c
 ata_drive_t* drive = ata_get_drive(0);
 if (drive) {
-    kprintf("Drive status: %d\n", drive->status);
-    kprintf("Drive mode: %d\n", drive->mode);
+        kprintf("Drive status: %d\n", drive->status);
+        kprintf("Drive mode: %d\n", drive->mode);
 }
 ```
 

@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-// Функции для работы со строками
+// functions for working with strings
 size_t strlen(const char* str);
 char* strcpy(char* dest, const char* src);
 char* strncpy(char* dest, const char* src, size_t n);
@@ -18,13 +18,13 @@ char* strstr(const char* haystack, const char* needle);
 char* strtok(char* str, const char* delim);
 int trim(char* str);
 
-// Функции для работы с памятью
+// functions for working with memory
 void* memcpy(void* dest, const void* src, size_t n);
 void* memmove(void* dest, const void* src, size_t n);
 void* memset(void* ptr, int value, size_t n);
 int memcmp(const void* ptr1, const void* ptr2, size_t n);
 
-// Дополнительные функции
+// additional functions
 void itoa(int value, char* str, int base);
 void utoa(uint32_t value, char* str, int base);
 int atoi(const char* str);

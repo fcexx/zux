@@ -11,6 +11,10 @@ typedef short int16_t;
 typedef int int32_t;
 typedef long long int64_t;
 
+// Pointer-sized integers
+typedef unsigned long long uintptr_t;
+typedef long long                  intptr_t;
+
 // Boolean type
 #ifndef __cplusplus
 typedef int bool;

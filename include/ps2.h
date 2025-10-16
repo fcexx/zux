@@ -7,16 +7,16 @@
 extern "C" {
 #endif
 
-// Инициализация PS/2 клавиатуры
+// initialize PS/2 keyboard
 void ps2_keyboard_init();
 
-// Получить символ (блокирующая функция, как в Unix)
+// get symbol (blocking function, like in Unix)
 char kgetc();
 
-// Проверить, есть ли доступные символы (неблокирующая)
+// check if there are available symbols (non-blocking)
 int kgetc_available();
 
-// Получить строку с поддержкой стрелок и редактирования
+// get string with support for arrows and editing
 char* kgets(char* buffer, int max_length);
 
 #ifdef __cplusplus

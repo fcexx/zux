@@ -2,34 +2,38 @@
 
 #include <stdint.h>
 
+// cpu registers structure
 typedef struct {
-    uint64_t interrupt_number;      // номер вектора прерывания
-    uint64_t error_code;    // код ошибки (или 0)
-    // Сохранённые регистры CPU
-    uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
-    uint64_t rdi, rsi, rbp, rbx, rdx, rcx, rax;
-    // Сохранённые аппаратные значения
-    uint64_t rip, cs, rflags, rsp, ss;
+        uint64_t interrupt_number;          // interrupt number
+        uint64_t error_code;        // error code (or 0)
+        // saved cpu registers
+        uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
+        uint64_t rdi, rsi, rbp, rbx, rdx, rcx, rax;
+        // saved hardware values
+        uint64_t rip, cs, rflags, rsp, ss;
 } cpu_registers_t;
 
+// idt entry structure
 struct idt_entry_t {
-    uint16_t offset_low;
-    uint16_t selector;
-    uint8_t ist;
-    uint8_t flags;
-    uint16_t offset_mid;
-    uint32_t offset_high;
-    uint32_t reserved;
+        uint16_t offset_low;
+        uint16_t selector;
+        uint8_t ist;
+        uint8_t flags;
+        uint16_t offset_mid;
+        uint32_t offset_high;
+        uint32_t reserved;
 } __attribute__((packed));
 
+// idt pointer structure
 struct idt_ptr_t {
-    uint16_t limit;
-    uint64_t base;
+        uint16_t limit;
+        uint64_t base;
 } __attribute__((packed));
 
+// extern c linkage helpers
 extern "C" {
-    extern uint64_t isr_stub_table[];
-    void isr_dispatch(cpu_registers_t* regs);
+        extern uint64_t isr_stub_table[];
+        void isr_dispatch(cpu_registers_t* regs);
 }
 
 extern const char* exception_messages[];

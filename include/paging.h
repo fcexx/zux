@@ -4,29 +4,29 @@
 #include <stdint.h>
 
 // Page table entry flags
-#define PAGE_PRESENT        0x001
-#define PAGE_WRITABLE       0x002
-#define PAGE_USER           0x004
+#define PAGE_PRESENT                0x001
+#define PAGE_WRITABLE           0x002
+#define PAGE_USER                   0x004
 #define PAGE_WRITETHROUGH   0x008
 #define PAGE_CACHE_DISABLE  0x010
-#define PAGE_ACCESSED       0x020
-#define PAGE_DIRTY          0x040
-#define PAGE_HUGE           0x080
-#define PAGE_GLOBAL         0x100
-#define PAGE_NX             0x8000000000000000ULL
+#define PAGE_ACCESSED           0x020
+#define PAGE_DIRTY                  0x040
+#define PAGE_HUGE                   0x080
+#define PAGE_GLOBAL                 0x100
+#define PAGE_NX                         0x8000000000000000ULL
 
 // Page table levels
-#define PAGE_SIZE           0x1000
-#define PAGE_MASK           0x000FFFFFFFFFF000ULL
+#define PAGE_SIZE                   0x1000
+#define PAGE_MASK                   0x000FFFFFFFFFF000ULL
 
 // Virtual address structure (deprecated bitfields)
 typedef struct {
-    uint64_t offset : 12;
-    uint64_t l1_index : 9;
-    uint64_t l2_index : 9;
-    uint64_t l3_index : 9;
-    uint64_t l4_index : 9;
-    uint64_t sign_extend : 16;
+        uint64_t offset : 12;
+        uint64_t l1_index : 9;
+        uint64_t l2_index : 9;
+        uint64_t l3_index : 9;
+        uint64_t l4_index : 9;
+        uint64_t sign_extend : 16;
 } __attribute__((packed)) virtual_address_t;
 
 // Page table entry

@@ -3,14 +3,17 @@
 
 #include <stdint.h>
 
+// gdt is an important shi
+
 void gdt_init();
 void tss_set_rsp0(uint64_t rsp0);
+// when we returning to ring3 we need to switch to user mode
 void enter_user_mode(uint64_t user_entry, uint64_t user_stack_top);
 
-// Expose user segment selectors
-extern uint16_t KERNEL_CS;
-extern uint16_t KERNEL_DS;
-extern uint16_t USER_CS;
-extern uint16_t USER_DS;
+// expose user segment selectors (ts always has been in asm)
+extern uint16_t KERNEL_CS;  // kernel code selector
+extern uint16_t KERNEL_DS;  // Kernel data selector
+extern uint16_t USER_CS;    // user code selector (Ring 3)
+extern uint16_t USER_DS;    // user data selector (Ring3)
 
 #endif // GDT_H 
