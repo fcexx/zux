@@ -66,15 +66,20 @@ isr%1:
 
 %macro ISR_ERR 1
 isr%1:
-        pop rax                         ; save CPU-provided error code
+        ; CPU уже положил error code на стек. Не снимать его сейчас, иначе испортим кадр для iretq.
+        ; Сначала сохраняем все регистры.
         PUSH_REGS
-        push rax                        ; real error code
+        ; Скопируем CPU error code (лежит под сохранёнными регистрами)
+        ; PUSH_REGS положил 15 регистров по 8 байт => 120 байт.
+        mov rax, [rsp + 120]
+        push rax                        ; дублируем error code для C-обработчика
         mov rax, %1
         push rax                        ; interrupt number
         mov rdi, rsp                ; rdi -> cpu_registers_t
         call isr_dispatch
-        add rsp, 16                 ; pop vector + error code
+        add rsp, 16                 ; убрать vector + дубликат error code
         POP_REGS
+        add rsp, 8                  ; убрать оригинальный CPU error code перед iretq
         iretq
 %endmacro
 

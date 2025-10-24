@@ -2,7 +2,7 @@
 #define VBETTY_H
 
 #include <stdint.h>
-#include <spinlock.h>
+#include "spinlock.h"
 
 #ifdef __cplusplus
 extern "C" {

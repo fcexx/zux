@@ -5,7 +5,6 @@
 #include <spinlock.h>
 #include <ata.h>
 #include <thread.h>
-#include <vbetty.h>
 
 // I/O планировщик
 static io_request_t* pending_queue = nullptr;

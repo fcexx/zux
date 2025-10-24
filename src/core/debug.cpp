@@ -1,5 +1,10 @@
 #include <debug.h>
 #include <stdarg.h>
+#include <string.h>
+#include <stdint.h>
+#include <pit.h>
+#include <fs_interface.h>
+#include <vga.h>
 
 void outb(uint16_t port, uint8_t val) {
         asm volatile("outb %0, %1" : : "a"(val), "Nd"(port));
@@ -374,3 +379,102 @@ void PrintfQEMU(const char* format, ...) {
         
         va_end(args);
 } 
+
+static char g_mslog_buf[32];
+const char* k_get_mslog(){
+        // формат как в Linux: "   0.000000" с 6 дробными знаками
+        // используем pit_ticks и pit_frequency
+        uint64_t ticks = pit_ticks;
+        uint32_t freq = pit_frequency ? pit_frequency : 1000;
+        // секунды и микросекунды
+        uint64_t sec = (freq ? (ticks / freq) : 0);
+        uint64_t rem = (freq ? (ticks % freq) : 0);
+        uint64_t usec = (freq ? (rem * 1000000ULL) / freq : 0);
+        // соберём строку: три ведущих пробела выравнивания, как [   0.000000]
+        // наполним буфер
+        char* p = g_mslog_buf;
+        // выравнивание сек до 4 позиций пробелами (минимум 1)
+        // посчитаем длину sec
+        char tmp[24]; int ti=0; uint64_t s=sec; if (s==0) tmp[ti++]='0'; else { while(s){ tmp[ti++] = '0' + (s%10); s/=10; } }
+        int pad = 4 - ti; if (pad < 1) pad = 1; while (pad--) *p++ = ' ';
+        while (ti) *p++ = tmp[--ti];
+        *p++ = '.';
+        // шесть цифр usec
+        uint64_t u = usec;
+        // ведущие нули
+        uint32_t divs[6] = {100000,10000,1000,100,10,1};
+        for (int i=0;i<6;i++){
+                uint32_t d = divs[i];
+                uint32_t digit = (uint32_t)((u / d) % 10);
+                *p++ = (char)('0' + digit);
+        }
+        *p = '\0';
+        return g_mslog_buf;
+}
+
+static void klog_write_prefix_buf(char* dst, size_t cap){
+        if (!dst || cap==0) return;
+        const char* ts = k_get_mslog();
+        size_t i = 0;
+        if (i < cap-1) dst[i++] = '[';
+        for (const char* p = ts; *p && i < cap-1; ++p) dst[i++] = *p;
+        if (i < cap-1) dst[i++] = ']';
+        if (i < cap-1) dst[i++] = ' ';
+        dst[i] = '\0';
+}
+static char buf[1024];
+int klog_vprintf(const char* fmt, va_list ap){
+        if (!fmt) return 0;
+        // Сформируем строку в локальный буфер и выведем через kprintf (экран+VFS) buf[0] = '\0';
+        char* p = buf;
+        klog_write_prefix_buf(p, sizeof(buf));
+        size_t used = strlen(p);
+        p += used;
+        const char* f = fmt;
+        while (*f && (p < buf + sizeof(buf) - 1)){
+                if (*f != '%'){ *p++ = *f++; continue; }
+                f++;
+                bool zpad=false; int width=0; while (*f=='0'){ zpad=true; f++; }
+                while (*f>='0'&&*f<='9'){ width = width*10 + (*f - '0'); f++; }
+                int lcount=0; while (*f=='l'){ lcount++; f++; }
+                char spec = *f ? *f++ : 0;
+                auto out_num=[&](unsigned long long v,int base,bool upper){
+                        const char* digs = upper?"0123456789ABCDEF":"0123456789abcdef";
+                        char t[64]; int i=0; if (v==0) t[i++]='0'; else while(v){ t[i++]=digs[v%base]; v/=base; }
+                        int pad = width - i; while (pad-- > 0 && p < buf + sizeof(buf) - 1) *p++ = zpad?'0':' ';
+                        while (i && p < buf + sizeof(buf) - 1) *p++ = t[--i];
+                };
+                switch(spec){
+                        case 'd': case 'i': {
+                                long long v = (lcount>=2) ? va_arg(ap,long long) : (lcount==1) ? (long long)va_arg(ap,long) : (long long)va_arg(ap,int);
+                                if (v<0){ *p++='-'; v=-v; }
+                                out_num((unsigned long long)v,10,false);
+                                break; }
+                        case 'u': {
+                                unsigned long long v = (lcount>=2) ? va_arg(ap,unsigned long long) : (lcount==1) ? (unsigned long long)va_arg(ap,unsigned long) : (unsigned long long)va_arg(ap,unsigned int);
+                                out_num(v,10,false); break; }
+                        case 'x': case 'X': {
+                                bool upper = (spec=='X');
+                                unsigned long long v = (lcount>=2) ? va_arg(ap,unsigned long long) : (lcount==1) ? (unsigned long long)va_arg(ap,unsigned long) : (unsigned long long)va_arg(ap,unsigned int);
+                                out_num(v,16,upper); break; }
+                        case 'p': {
+                                unsigned long long v = (unsigned long long)va_arg(ap, void*);
+                                if (p < buf + sizeof(buf) - 2){ *p++='0'; *p++='x'; }
+                                out_num(v,16,false); break; }
+                        case 's': {
+                                const char* s = va_arg(ap,const char*);
+                                if (!s) s = "(null)";
+                                while (*s && p < buf + sizeof(buf) - 1) *p++ = *s++;
+                                break; }
+                        case 'c': { int ch = va_arg(ap,int); *p++ = (char)ch; break; }
+                        case '%': { *p++ = '%'; break; }
+                        default: { *p++ = '%'; if (spec) *p++ = spec; break; }
+                }
+        }
+        *p = '\0';
+        if (p==buf || *(p-1)!='\n') { *p++='\n'; *p='\0'; }
+        kprintf("%s", buf);
+        return (int)strlen(buf);
+}
+
+int klog_printf(const char* fmt, ...){ va_list ap; va_start(ap, fmt); int r = klog_vprintf(fmt, ap); va_end(ap); return r; }

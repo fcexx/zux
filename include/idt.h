@@ -41,3 +41,5 @@ extern const char* exception_messages[];
 void idt_init();
 void idt_set_gate(uint8_t num, uint64_t handler, uint16_t selector, uint8_t flags);
 void idt_set_handler(uint8_t num, void (*handler)(cpu_registers_t*));
+// Debug helper
+void idt_dbg_dump_vec(uint8_t vec);

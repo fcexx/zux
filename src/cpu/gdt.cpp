@@ -1,6 +1,6 @@
 #include <gdt.h>
-#include <vbetty.h>
 #include <stdint.h>
+#include <vbetty.h>
 #include <debug.h>
 
 #pragma pack(push,1)
@@ -84,7 +84,6 @@ extern "C" void ltr_load(uint16_t sel);
 extern "C" void enter_user_mode_asm(uint64_t entry, uint64_t user_stack, uint16_t user_ds, uint16_t user_cs);
 
 void gdt_init() {
-        PrintfQEMU("[gdt] gdt_init: starting...\n");
         // null descriptor
         set_seg_desc(0, 0, 0, 0, 0);
         // kernel code (long mode): access=0x9A (present|ring0|code|read), flags L=1 (0x20), G can be 0
@@ -95,8 +94,6 @@ void gdt_init() {
         set_seg_desc(3, 0, 0, 0xFA, 0x20);
         // user data: access=0xF2 (present|ring3|data|write)
         set_seg_desc(4, 0, 0, 0xF2, 0x00);
-
-        PrintfQEMU("[gdt] gdt_init: descriptors set\n");
         // init TSS
         for (int i = 0; i < (int)sizeof(tss)/8; ++i) ((uint64_t*)&tss)[i] = 0;
         tss.io_map_base = sizeof(tss);
@@ -109,13 +106,11 @@ void gdt_init() {
         gdt_desc.limit = sizeof(gdt) - 1;
         gdt_desc.base = (uint64_t)&gdt[0];
 
-        PrintfQEMU("[gdt] gdt_init: loading GDT...\n");
         lgdt_load(&gdt_desc);
         // Load TR with TSS selector (index 5 -> selector 0x28)
         ltr_load(0x28);
 
-        PrintfQEMU("[gdt] gdt_init: enabling FSGSBASE...\n");
-        kprintf("gdt: enabling FSGSBASE...\n");
+        klog_printf("gdt: enabling FSGSBASE...\n");
         // Enable CR4.FSGSBASE so usermode can use RD/WRFSBASE/RD/WRGSBASE without #GP(0)
         // Many modern libcs rely on this when CPUID advertises FSGSBASE support.
         
@@ -123,21 +118,14 @@ void gdt_init() {
         uint32_t eax, ebx, ecx, edx;
         asm volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(7), "c"(0));
         bool fsgsbase_supported = (ebx & (1 << 0)) != 0;
-        PrintfQEMU("[gdt] FSGSBASE supported: %s\n", fsgsbase_supported ? "yes" : "no");
-        kprintf("gdt: FSGSBASE supported: %s\n", fsgsbase_supported ? "yes" : "no");
+        klog_printf("gdt: FSGSBASE supported: %s\n", fsgsbase_supported ? "yes" : "no");
         
         if (fsgsbase_supported) {
                 uint64_t cr4;
                 asm volatile("mov %%cr4, %0" : "=r"(cr4));
                 cr4 |= (1ULL << 16); // CR4.FSGSBASE
                 asm volatile("mov %0, %%cr4" :: "r"(cr4) : "memory");
-                PrintfQEMU("[gdt] FSGSBASE enabled\n");
-                kprintf("gdt: FSGSBASE enabled\n");
-        } else {
-                PrintfQEMU("[gdt] FSGSBASE not supported, skipping\n");
-                kprintf("gdt: FSGSBASE not supported, skipping\n");
         }
-        PrintfQEMU("[gdt] gdt_init: done\n");
 }
 
 void tss_set_rsp0(uint64_t rsp0) {

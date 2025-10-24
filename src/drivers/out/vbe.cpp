@@ -46,11 +46,11 @@ static inline void vbe_leave_cs(uint64_t f){ g_vbe_in_cs = 0; vbe_irq_restore(f)
 // kmalloc/kfree from heap.h
 
 void vbe_init(uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch, uint32_t bpp) {
-        g_fb_addr = (uint32_t*)(uint64_t)addr;
-        g_fb_width = width;
-        g_fb_height = height;
-        g_fb_pitch = pitch;
-        g_fb_bpp = bpp;
+    g_fb_addr = (uint32_t*)(uint64_t)addr;
+    g_fb_width = width;
+    g_fb_height = height;
+    g_fb_pitch = pitch;
+    g_fb_bpp = bpp;
         // Если это VGA текстовый режим (80x25 и подобные) — отключаем VBE-консоль
         // Признаки: bpp==16, pitch==width*2, ширина/высота небольшие (ячейки символов), адрес в окрестности 0xB8000
         bool looks_like_vga_text = (bpp == 16) && (pitch == width * 2) && (width <= 200) && (height <= 100) && ((addr & ~0xFFFFULL) == 0x000A0000ULL || addr == 0xB8000ULL);
@@ -64,11 +64,11 @@ void vbe_init(uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch, ui
         }
         // Разрешим 16/24/32 bpp. Для 16 bpp используем RGB565 при выводе
         g_fb_initialized = (g_fb_addr != nullptr) && width && height && pitch && (bpp == 32 || bpp == 24 || bpp == 16);
-        g_frontbuffer = g_fb_addr;
+    g_frontbuffer = g_fb_addr;
 }
 
 bool vbe_is_initialized() {
-        return g_fb_initialized;
+    return g_fb_initialized;
 }
 
 bool vbe_console_ready() {
@@ -83,24 +83,24 @@ uint64_t vbe_get_addr() { return (uint64_t)(uint64_t)g_fb_addr; }
 
 // Simple pixel plotter for potential future use
 void vbe_pixel(int x, int y, uint32_t color) {
-        if (!g_fb_initialized) return;
-        if (x < 0 || y < 0) return;
-        if ((uint32_t)x >= g_fb_width || (uint32_t)y >= g_fb_height) return;
+    if (!g_fb_initialized) return;
+    if (x < 0 || y < 0) return;
+    if ((uint32_t)x >= g_fb_width || (uint32_t)y >= g_fb_height) return;
         // map logical y to physical row with scroll offset
         uint32_t y_phys = (uint32_t)((y + g_scroll_px_off) % g_fb_height);
-        uint8_t* base = (uint8_t*)g_backbuffer; // draw to backbuffer
+    uint8_t* base = (uint8_t*)g_backbuffer; // draw to backbuffer
         *(uint32_t*)(base + (size_t)y_phys * (size_t)g_fb_width * 4 + (size_t)x * 4) = color;
         // mark dirty rect
         if (!g_fb_dirty) { g_dirty_x0 = (uint32_t)x; g_dirty_y0 = (uint32_t)y; g_dirty_x1 = (uint32_t)x+1; g_dirty_y1 = (uint32_t)y+1; }
         else { if ((uint32_t)x < g_dirty_x0) g_dirty_x0 = (uint32_t)x; if ((uint32_t)y < g_dirty_y0) g_dirty_y0 = (uint32_t)y; if ((uint32_t)x+1 > g_dirty_x1) g_dirty_x1 = (uint32_t)x+1; if ((uint32_t)y+1 > g_dirty_y1) g_dirty_y1 = (uint32_t)y+1; }
-        g_fb_dirty = true;
+	g_fb_dirty = true;
 }
 
 void vbe_clear(uint32_t color) {
-        if (!g_fb_initialized || !g_backbuffer) return;
+    if (!g_fb_initialized || !g_backbuffer) return;
         uint64_t irqf = vbe_enter_cs();
         g_scroll_px_off = 0;
-        size_t count = (size_t)g_fb_width * (size_t)g_fb_height;
+    size_t count = (size_t)g_fb_width * (size_t)g_fb_height;
 	for (size_t i = 0; i < count; ++i) g_backbuffer[i] = color;
 	// full screen dirty
 	g_fb_dirty = true; g_dirty_x0 = 0; g_dirty_y0 = 0; g_dirty_x1 = g_fb_width; g_dirty_y1 = g_fb_height;
@@ -108,7 +108,7 @@ void vbe_clear(uint32_t color) {
 }
 
 void vbe_shutdown() {
-        // nothing for now (backbuffer leak acceptable until kfree available here)
+    // nothing for now (backbuffer leak acceptable until kfree available here)
 }
 
 void vbe_set_present_enabled(int enable) { g_present_enabled = enable ? 1 : 0; }
@@ -123,20 +123,20 @@ void vbe_swap() {
         uint32_t x1 = (g_dirty_x1 <= g_fb_width ? g_dirty_x1 : g_fb_width);
         uint32_t y1 = (g_dirty_y1 <= g_fb_height ? g_dirty_y1 : g_fb_height);
         if (x1 <= x0 || y1 <= y0) { g_fb_dirty = false; return; }
-        // copy backbuffer to frontbuffer respecting pitch
-        uint8_t* src = (uint8_t*)g_backbuffer;
-        uint8_t* dst = (uint8_t*)g_frontbuffer;
+    // copy backbuffer to frontbuffer respecting pitch
+    uint8_t* src = (uint8_t*)g_backbuffer;
+    uint8_t* dst = (uint8_t*)g_frontbuffer;
         size_t row_bytes_full = (size_t)g_fb_width * 4;
         uint32_t copy_w = x1 - x0;
-        if (g_fb_bpp == 32) {
+    if (g_fb_bpp == 32) {
                 size_t copy_bytes = (size_t)copy_w * 4;
                 for (uint32_t y = y0; y < y1; ++y) {
                         uint32_t y_src = (uint32_t)((y + g_scroll_px_off) % g_fb_height);
                         uint8_t* drow = dst + (size_t)y * (size_t)g_fb_pitch + (size_t)x0 * 4;
                         uint8_t* srow = src + (size_t)y_src * row_bytes_full + (size_t)x0 * 4;
                         // copy changed span
-                        uint32_t* d32 = (uint32_t*)drow;
-                        uint32_t* s32 = (uint32_t*)srow;
+            uint32_t* d32 = (uint32_t*)drow;
+            uint32_t* s32 = (uint32_t*)srow;
                         for (uint32_t x = 0; x < copy_w; ++x) d32[x] = s32[x];
                 }
         } else if (g_fb_bpp == 24) { // 24 bpp
@@ -145,12 +145,12 @@ void vbe_swap() {
                         uint8_t* drow = dst + (size_t)y * (size_t)g_fb_pitch + (size_t)x0 * 3;
                         uint32_t* s32 = (uint32_t*)(src + (size_t)y_src * row_bytes_full + (size_t)x0 * 4);
                         for (uint32_t x = 0; x < copy_w; ++x) {
-                                uint32_t px = s32[x];
-                                drow[x*3+0] = (uint8_t)(px & 0xFF);
-                                drow[x*3+1] = (uint8_t)((px >> 8) & 0xFF);
-                                drow[x*3+2] = (uint8_t)((px >> 16) & 0xFF);
-                        }
-                }
+                uint32_t px = s32[x];
+                drow[x*3+0] = (uint8_t)(px & 0xFF);
+                drow[x*3+1] = (uint8_t)((px >> 8) & 0xFF);
+                drow[x*3+2] = (uint8_t)((px >> 16) & 0xFF);
+            }
+        }
         } else if (g_fb_bpp == 16) { // RGB565
                 for (uint32_t y = y0; y < y1; ++y) {
                         uint32_t y_src = (uint32_t)((y + g_scroll_px_off) % g_fb_height);
@@ -254,38 +254,38 @@ void vbe_swap() {
 static inline uint32_t vbec_color(uint8_t idx) { return g_palette[idx & 15]; }
 
 void vbec_init_console() {
-        if (!g_fb_initialized) return;
-        // allocate backbuffer now that heap is initialized
+    if (!g_fb_initialized) return;
+    // allocate backbuffer now that heap is initialized
+    if (!g_backbuffer) {
+        size_t bytes = (size_t)g_fb_width * (size_t)g_fb_height * 4;
+        g_backbuffer = (uint32_t*)kmalloc(bytes);
         if (!g_backbuffer) {
-                size_t bytes = (size_t)g_fb_width * (size_t)g_fb_height * 4;
-                g_backbuffer = (uint32_t*)kmalloc(bytes);
-                if (!g_backbuffer) {
                         // Без backbuffer корректно можем работать только при 32 bpp
                         if (g_fb_bpp == 32) {
                                 g_backbuffer = (uint32_t*)g_frontbuffer;
-                        } else {
+        } else {
                                 // отключим VBE‑консоль, чтобы не писать 32-битные пиксели в 16/24-битный буфер
                                 g_fb_initialized = false;
                                 return;
                         }
                 }
                 if (g_backbuffer && g_backbuffer != (uint32_t*)g_frontbuffer) {
-                        for (size_t i = 0; i < (bytes / 4); ++i) g_backbuffer[i] = 0x00000000U;
-                }
+            for (size_t i = 0; i < (bytes / 4); ++i) g_backbuffer[i] = 0x00000000U;
         }
+    }
         // 9x16 font grid and palette
         g_cons_w = g_fb_width / g_cell_w;
         g_cons_h = g_fb_height / g_cell_h;
-        g_palette[0]=0xFF000000; g_palette[1]=0xFF0000AA; g_palette[2]=0xFF00AA00; g_palette[3]=0xFF00AAAA;
-        g_palette[4]=0xFFAA0000; g_palette[5]=0xFFAA00AA; g_palette[6]=0xFFAA5500; g_palette[7]=0xFFAAAAAA;
-        g_palette[8]=0xFF555555; g_palette[9]=0xFF5555FF; g_palette[10]=0xFF55FF55; g_palette[11]=0xFF55FFFF;
-        g_palette[12]=0xFFFF5555; g_palette[13]=0xFFFF55FF; g_palette[14]=0xFFFFFF55; g_palette[15]=0xFFFFFFFF;
-        g_cursor_x = g_cursor_y = 0;
+    g_palette[0]=0xFF000000; g_palette[1]=0xFF0000AA; g_palette[2]=0xFF00AA00; g_palette[3]=0xFF00AAAA;
+    g_palette[4]=0xFFAA0000; g_palette[5]=0xFFAA00AA; g_palette[6]=0xFFAA5500; g_palette[7]=0xFFAAAAAA;
+    g_palette[8]=0xFF555555; g_palette[9]=0xFF5555FF; g_palette[10]=0xFF55FF55; g_palette[11]=0xFF55FFFF;
+    g_palette[12]=0xFFFF5555; g_palette[13]=0xFFFF55FF; g_palette[14]=0xFFFFFF55; g_palette[15]=0xFFFFFFFF;
+    g_cursor_x = g_cursor_y = 0;
 	vbe_clear(0x00000000);
 }
 
 void vbec_set_palette_entry(uint8_t idx, uint8_t r, uint8_t g, uint8_t b) {
-        g_palette[idx & 15] = 0xFF000000U | ((uint32_t)r) | ((uint32_t)g << 8) | ((uint32_t)b << 16);
+    g_palette[idx & 15] = 0xFF000000U | ((uint32_t)r) | ((uint32_t)g << 8) | ((uint32_t)b << 16);
 }
 
 void vbec_set_fg(uint8_t idx) { (void)idx; }
@@ -309,24 +309,24 @@ static void vbec_draw_char(uint32_t cx, uint32_t cy, char c, uint32_t fg, uint32
                 for (uint32_t col = 0; col < safe_w; ++col) {
                         // Каждый ряд шрифта использует младшие 9 бит: выбираем бит 8..0
                         bool on = (bits & (1u << (g_cell_w - 1 - col))) != 0;
-                        dst[col] = on ? fg : bg;
-                }
+            dst[col] = on ? fg : bg;
         }
+    }
         // mark dirty rect for this cell
         if (!g_fb_dirty) { g_dirty_x0 = x0; g_dirty_y0 = y0; g_dirty_x1 = x0 + g_cell_w; g_dirty_y1 = y0 + g_cell_h; }
         else { if (x0 < g_dirty_x0) g_dirty_x0 = x0; if (y0 < g_dirty_y0) g_dirty_y0 = y0; uint32_t ex = x0 + g_cell_w, ey = y0 + g_cell_h; if (ex > g_dirty_x1) g_dirty_x1 = ex; if (ey > g_dirty_y1) g_dirty_y1 = ey; }
-        g_fb_dirty = true;
+	g_fb_dirty = true;
         vbe_leave_cs(irqf);
 }
 
 void vbec_put_cell(uint32_t x, uint32_t y, char c, uint8_t fg, uint8_t bg) {
-        if (!g_fb_initialized) return;
-        if (x >= g_cons_w || y >= g_cons_h) return;
+    if (!g_fb_initialized) return;
+    if (x >= g_cons_w || y >= g_cons_h) return;
         vbec_draw_char(x , y, c, vbec_color(fg), vbec_color(bg));
 }
 
 void vbec_scroll_up(uint8_t bg_idx) {
-        if (!g_fb_initialized || !g_backbuffer) return;
+    if (!g_fb_initialized || !g_backbuffer) return;
         uint64_t irqf = vbe_enter_cs();
         // Invalidate previously drawn cursor to avoid trails when logical scroll occurs
         g_prev_cursor_drawn = false;
@@ -334,12 +334,12 @@ void vbec_scroll_up(uint8_t bg_idx) {
         const uint32_t row_px = g_cell_h;
         g_scroll_px_off = (uint32_t)((g_scroll_px_off + row_px) % g_fb_height);
         // clear the newly revealed band at bottom of logical screen
-        uint32_t color = vbec_color(bg_idx);
+    uint32_t color = vbec_color(bg_idx);
         for (uint32_t i = 0; i < row_px; ++i) {
                 uint32_t y_phys = (uint32_t)((g_scroll_px_off + g_fb_height - row_px + i) % g_fb_height);
                 uint32_t* line = g_backbuffer + (size_t)y_phys * (size_t)g_fb_width;
-                for (uint32_t x = 0; x < g_fb_width; ++x) line[x] = color;
-        }
+		for (uint32_t x = 0; x < g_fb_width; ++x) line[x] = color;
+	}
         // full screen dirty after scroll
         g_fb_dirty = true; g_dirty_x0 = 0; g_dirty_y0 = 0; g_dirty_x1 = g_fb_width; g_dirty_y1 = g_fb_height;
         vbe_leave_cs(irqf);
@@ -392,7 +392,7 @@ void vbe_fill_rect(int x, int y, int width, int height, uint32_t color) {
 	}
         if (!g_fb_dirty) { g_dirty_x0 = (uint32_t)x0; g_dirty_y0 = (uint32_t)y0; g_dirty_x1 = (uint32_t)x1; g_dirty_y1 = (uint32_t)y1; }
         else { if ((uint32_t)x0 < g_dirty_x0) g_dirty_x0 = (uint32_t)x0; if ((uint32_t)y0 < g_dirty_y0) g_dirty_y0 = (uint32_t)y0; if ((uint32_t)x1 > g_dirty_x1) g_dirty_x1 = (uint32_t)x1; if ((uint32_t)y1 > g_dirty_y1) g_dirty_y1 = (uint32_t)y1; }
-        g_fb_dirty = true;
+	g_fb_dirty = true;
         vbe_leave_cs(irqf);
 }
 

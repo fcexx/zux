@@ -4,6 +4,7 @@
 #include <spinlock.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <fs_interface.h>
 
 // Console state for VGA text mode
 static uint32_t cons_w = 80;
@@ -27,8 +28,20 @@ static inline void vga_newline() {
     if (vbe_console_ready()) vbec_set_cursor(cur_x, cur_y); else vga_set_cursor(cur_x, cur_y);
 }
 
+// buffered VFS line append to avoid per-char reallocs
+static char klog_linebuf[1024];
+static size_t klog_linepos = 0;
+static inline void klog_linebuf_push(char c){
+        if (klog_linepos < sizeof(klog_linebuf)-1) { klog_linebuf[klog_linepos++] = c; }
+        if (c == '\n' || klog_linepos >= sizeof(klog_linebuf)-2) {
+                klog_linebuf[klog_linepos] = '\0';
+                vfs_klog_append(klog_linebuf, (unsigned long)klog_linepos);
+                klog_linepos = 0;
+        }
+}
+
 static inline void vga_putc(char c) {
-        if (c == '\n') { vga_newline(); return; }
+        if (c == '\n') { vga_newline(); extern void vfs_klog_append(const char*, unsigned long); vfs_klog_append("\n", 1); return; }
     if (c == '\r') { cur_x = 0; if (vbe_console_ready()) vbec_set_cursor(cur_x, cur_y); else vga_set_cursor(cur_x, cur_y); return; }
         if (c == '\b') {
                 if (cur_x > 0) { cur_x--; }
@@ -40,6 +53,8 @@ static inline void vga_putc(char c) {
     if (cur_x >= cons_w) { vga_newline(); }
     if (vbe_console_ready()) vbec_put_cell(cur_x, cur_y, c, fg_idx, bg_idx); else vga_put_cell(cur_x, cur_y, c, fg_idx, bg_idx);
     if (++cur_x >= cons_w) vga_newline(); else { if (vbe_console_ready()) vbec_set_cursor(cur_x, cur_y); else vga_set_cursor(cur_x, cur_y); }
+    // append to VFS kernel log (buffered until newline)
+    klog_linebuf_push(c);
 }
 
 static void vga_puts(const char* s) {
@@ -109,6 +124,7 @@ static inline int hex_nibble(char c) {
 
 int kprintf(const char* fmt, ...) {
         acquire(&vga_printf_lock);
+        
 
         // lazy init
     if (vbe_console_ready()) {

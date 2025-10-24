@@ -107,6 +107,8 @@ extern "C" {
 #endif
 fs_interface_t* vfs_get_interface();
 int vfs_mount_from_cpio(const void* data, unsigned long size);
+// kernel log append API to expose /dev/kmsg-like stream
+void vfs_klog_append(const char* s, unsigned long n);
 #ifdef __cplusplus
 }
 #endif

@@ -25,7 +25,7 @@ void thread_init() {
         threads[0] = &main_thread;
         thread_count = 1;
         strncpy(main_thread.name, "idle", sizeof(main_thread.name));
-        kprintf("thread_init: idle thread created with pid %d\n", main_thread.tid);
+        klog_printf("thread_init: idle thread created with pid %d\n", main_thread.tid);
         init = 1;
 }
 
@@ -105,7 +105,7 @@ void thread_stop(int pid) {
                         return;
                 }
         }
-        kprintf("thread_stop: thread %d not found or already terminated\n", pid);
+        klog_printf("thread %d not found or already terminated\n", pid);
 }
 
 void thread_block(int pid) {

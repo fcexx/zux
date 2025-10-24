@@ -10,6 +10,7 @@ struct VfsNode {
         uint32_t attr; // FS_ATTR_DIRECTORY or FS_ATTR_ARCHIVE
         uint64_t size;
         uint8_t* data; // for files
+        uint64_t capacity; // allocated size of data buffer
         VfsNode* parent;
         VfsNode* children; // singly-linked list
         VfsNode* next;
@@ -21,6 +22,7 @@ struct VfsFilePriv { VfsNode* node; uint64_t pos; };
 struct VfsDirPriv { VfsNode* node; VfsNode* it; };
 
 static VfsNode* vfs_root = nullptr;
+static VfsNode* vfs_klog = nullptr; // /var/log/kern.log
 
 static uint32_t to_attr(bool is_dir){ return is_dir ? FS_ATTR_DIRECTORY : FS_ATTR_ARCHIVE; }
 
@@ -29,6 +31,7 @@ static VfsNode* vfs_make_child(VfsNode* parent, const char* name, bool is_dir){
         memset(n, 0, sizeof(VfsNode));
         strncpy(n->name, name, sizeof(n->name)-1);
         n->attr = to_attr(is_dir);
+        n->capacity = 0;
         n->parent = parent;
         n->next = parent->children;
         parent->children = n;
@@ -77,9 +80,15 @@ int vfs_mount_from_cpio(const void* data, unsigned long size){
         memset(vfs_root, 0, sizeof(VfsNode));
         strcpy(vfs_root->name, "/");
         vfs_root->attr = FS_ATTR_DIRECTORY;
-        // ensure /dev exists and /dev/tty placeholder
+        // prepare minimal POSIX-like tree: /dev and /var/log
         VfsNode* dev = vfs_make_child(vfs_root, "dev", true);
         (void)dev;
+        VfsNode* var = vfs_make_child(vfs_root, "var", true);
+        VfsNode* log = vfs_make_child(var, "log", true);
+        vfs_klog = vfs_make_child(log, "kern.log", false);
+        vfs_klog->data = nullptr;
+        vfs_klog->size = 0;
+        vfs_klog->capacity = 0;
 
         const uint8_t* p = (const uint8_t*)data;
         const uint8_t* p0 = p;
@@ -212,7 +221,29 @@ static fs_dir_t* vfs_opendir(const char* path){ VfsNode* n=vfs_lookup_path(path)
 static int vfs_readdir(fs_dir_t* dir, fs_dirent_t* ent){ if(!dir||!ent||!dir->private_data) return -1; VfsDirPriv* pv=(VfsDirPriv*)dir->private_data; VfsNode* it = pv->it; if(!it) return -1; memset(ent,0,sizeof(*ent)); strncpy(ent->name,it->name,sizeof(ent->name)-1); ent->attributes=it->attr; ent->size=it->size; pv->it = it->next; return 0; }
 static int vfs_closedir(fs_dir_t* dir){ if(!dir) return -1; if(dir->private_data) kfree(dir->private_data); return 0; }
 static int vfs_stat(const char* path, fs_stat_t* st){ VfsNode* n=vfs_lookup_path(path); if(!n||!st) return -1; memset(st,0,sizeof(*st)); st->size=n->size; st->attributes=n->attr; return 0; }
-static int vfs_write(fs_file_t*, const void*, size_t){ return -30; }
+static int vfs_write(fs_file_t* f, const void* buf, size_t sz){
+        if (!f || !f->private_data || !buf || sz==0) return -1;
+        VfsFilePriv* pv = (VfsFilePriv*)f->private_data;
+        VfsNode* n = pv->node;
+        if (!n || (n->attr & FS_ATTR_DIRECTORY)) return -1;
+        // append-only behavior for klog
+        if (f->mode & FS_OPEN_APPEND) pv->pos = n->size;
+        uint64_t need = pv->pos + sz;
+        // ensure capacity
+        if (need > n->capacity){
+                uint64_t newcap = n->capacity ? n->capacity : 4096;
+                while (newcap < need) newcap *= 2;
+                uint8_t* nd = (uint8_t*)kmalloc((size_t)newcap);
+                if (!nd) return -12; // ENOMEM
+                if (n->data && n->size) memcpy(nd, n->data, (size_t)n->size);
+                n->data = nd; n->capacity = newcap;
+        }
+        memcpy(n->data + pv->pos, buf, sz);
+        if (need > n->size) n->size = need;
+        pv->pos += sz;
+        if (f->size < pv->pos) f->size = pv->pos;
+        return (int)sz;
+}
 static int vfs_mkdir(const char*){ return -30; }
 static int vfs_unlink(const char*){ return -30; }
 static int vfs_rename(const char*, const char*){ return -30; }
@@ -235,3 +266,9 @@ static fs_interface_t vfs_if = {
 
 extern "C" fs_interface_t* vfs_get_interface(){ return &vfs_if; } 
 extern "C" const char* vfs_readlink_target(const char* path){ VfsNode* n = vfs_lookup_path(path); if (!n || !n->is_symlink) return nullptr; return n->link_target; }
+
+extern "C" void vfs_klog_append(const char* s, unsigned long n){
+        if (!vfs_klog || !s || n==0) return;
+        fs_file_t tf; memset(&tf,0,sizeof(tf)); VfsFilePriv pv; pv.node=vfs_klog; pv.pos=vfs_klog->size; tf.private_data=&pv; tf.size=vfs_klog->size; tf.mode = FS_OPEN_APPEND;
+        (void)vfs_write(&tf, s, (size_t)n);
+}

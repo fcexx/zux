@@ -17,6 +17,7 @@
 #include <gdt.h>
 #include <syscall.h>
 #include <elf.h>
+#include <sysinfo.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -43,6 +44,11 @@ extern "C" {
 
 extern "C" int vfs_mount_from_cpio(const void* data, unsigned long size);
 extern "C" fs_interface_t* vfs_get_interface();
+// TLS metadata exported by src/fs/elf.cpp
+extern "C" uint64_t elf_last_tls_image_vaddr;
+extern "C" uint64_t elf_last_tls_filesz;
+extern "C" uint64_t elf_last_tls_memsz;
+extern "C" uint64_t elf_last_tls_align;
 
 extern "C" void enable_sse() {
         unsigned long cr0, cr4;
@@ -50,12 +56,12 @@ extern "C" void enable_sse() {
         cr0 &= ~(1UL << 2);   // EM=0 (enable FPU instructions)
         cr0 |=  (1UL << 1);   // MP=1 (monitor coprocessor)
         asm volatile ("mov %0, %%cr0" :: "r"(cr0));
-
+    
         asm volatile ("mov %%cr4, %0" : "=r"(cr4));
-        cr4 |= (1UL << 9);        // OSFXSR=1 (enable SSE/SSE2 instructions)
+        cr4 |= (1UL << 9);    // OSFXSR=1 (enable SSE/SSE2 instructions)
         cr4 |= (1UL << 10);   // OSXMMEXCPT=1 (enable unmasked SIMD FP exceptions)
         asm volatile ("mov %0, %%cr4" :: "r"(cr4));
-}
+    }
 
 void parse_multiboot2(uint64_t addr) {
         struct multiboot2_tag* tag;
@@ -168,8 +174,13 @@ static int kexecve(const char* path, const char* const* argv){
         sp -= sizeof(rnd); memcpy((void*)sp, rnd, sizeof(rnd)); uint64_t at_random_ptr = sp;
         sp &= ~0xFULL;
 
-        const uint64_t AT_NULL=0, AT_PAGESZ=6, AT_PHDR=3, AT_PHENT=4, AT_PHNUM=5, AT_ENTRY=9, AT_RANDOM=25;
-        size_t vec_qwords = 1 + (size_t)argc + 1 + 4 + 1 + 2*7;
+        // Place execfn string on stack
+        size_t execfn_len = strlen(path) + 1;
+        sp -= execfn_len; memcpy((void*)sp, path, execfn_len); uint64_t execfn_ptr = sp;
+        sp &= ~0xFULL;
+
+        const uint64_t AT_NULL=0, AT_PHDR=3, AT_PHENT=4, AT_PHNUM=5, AT_PAGESZ=6, AT_BASE=7, AT_ENTRY=9, AT_UID=11, AT_EUID=12, AT_GID=13, AT_EGID=14, AT_CLKTCK=17, AT_RANDOM=25, AT_SECURE=23, AT_EXECFN=31;
+        size_t vec_qwords = 1 + (size_t)argc + 1 + 4 + 1 + 2*22;
         sp -= vec_qwords * 8ULL;
         uint64_t* vec = (uint64_t*)sp;
         size_t idx = 0;
@@ -182,41 +193,18 @@ static int kexecve(const char* path, const char* const* argv){
         vec[idx++] = AT_PHNUM;  vec[idx++] = at_phnum;
         vec[idx++] = AT_ENTRY;  vec[idx++] = at_entry;
         vec[idx++] = AT_PAGESZ; vec[idx++] = 4096;
+        vec[idx++] = AT_BASE;   vec[idx++] = 0;
+        vec[idx++] = AT_UID;    vec[idx++] = 0;
+        vec[idx++] = AT_EUID;   vec[idx++] = 0;
+        vec[idx++] = AT_GID;    vec[idx++] = 0;
+        vec[idx++] = AT_EGID;   vec[idx++] = 0;
+        vec[idx++] = AT_CLKTCK; vec[idx++] = 100;
+        vec[idx++] = AT_SECURE; vec[idx++] = 0;
+        vec[idx++] = AT_EXECFN; vec[idx++] = execfn_ptr;
         vec[idx++] = AT_RANDOM; vec[idx++] = at_random_ptr;
         vec[idx++] = AT_NULL;   vec[idx++] = 0;
 
-        // TLS bootstrap для kexecve (busybox): используем параметры PT_TLS, если есть
-        {
-                extern uint64_t elf_last_tls_image_vaddr;
-                extern uint64_t elf_last_tls_filesz;
-                extern uint64_t elf_last_tls_memsz;
-                extern uint64_t elf_last_tls_align;
-                uint64_t t_filesz = elf_last_tls_filesz;
-                uint64_t t_memsz  = elf_last_tls_memsz ? elf_last_tls_memsz : t_filesz;
-                uint64_t t_align  = elf_last_tls_align ? elf_last_tls_align : 16;
-                uint64_t tp = 0;
-                if (t_memsz) {
-                        uint64_t alloc = (t_memsz + t_align - 1) & ~(t_align - 1);
-                        uint64_t base = (ustack_top & ~0xFFFULL) - ((alloc + 0xFFFULL) & ~0xFFFULL);
-                        for (uint64_t va = base & ~0xFFFULL; va < ((base + alloc + 0xFFFULL) & ~0xFFFULL); va += 0x1000ULL) {
-                                void* raw = kmalloc_aligned(0x1000, 0x1000); if (!raw) break;
-                                paging_map_page(va, (uint64_t)raw, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
-                                memset((void*)va, 0, 0x1000);
-                        }
-                        if (t_filesz) memcpy((void*)(base + (alloc - t_filesz)), (const void*)elf_last_tls_image_vaddr, (size_t)t_filesz);
-                        uint64_t zero_start = base + (alloc - t_memsz);
-                        for (uint64_t off = 0; off < (t_memsz - t_filesz); ++off) ((volatile uint8_t*)(zero_start))[off] = 0;
-                        tp = base + alloc; // FS указывает на конец TLS блока
-                } else {
-                        uint64_t va = (ustack_top & ~0xFFFULL) - 0x1000ULL; void* raw = kmalloc_aligned(0x1000, 0x1000);
-                        if (raw) { paging_map_page(va, (uint64_t)raw, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER); memset((void*)va, 0, 0x1000); tp = va + 0x1000ULL; }
-                }
-                if (tp) {
-                        ((uint64_t*)(tp - 8))[0] = tp; // self-pointer
-                        const uint32_t IA32_FS_BASE = 0xC0000100; uint32_t lo=(uint32_t)(tp & 0xFFFFFFFFu), hi=(uint32_t)(tp >> 32);
-                        asm volatile("wrmsr" :: "c"(IA32_FS_BASE), "a"(lo), "d"(hi));
-                }
-        }
+        // Не настраиваем TLS в ядре: это сделает glibc через arch_prctl(ARCH_SET_FS)
 
         const char* base = path; for (const char* p = path; *p; ++p) if (*p=='/') base = p+1;
         thread_register_user(at_entry, sp, base && *base ? base : "user");
@@ -241,6 +229,10 @@ static int kexecve(const char* path, const char* const* argv){
         return 0;
 }
 
+void process_exit() {
+        for(;;){ klog_printf("process\n"); }
+}
+
 extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_ptr) {
         enable_sse();
         parse_multiboot2(multiboot2_info_ptr);
@@ -250,7 +242,7 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
         pit_init();
         pic_unmask_irq(0);
         pic_unmask_irq(1);
-        
+
         paging_init();
 
         // Сначала инициализируем heap, затем консоль (для VBE backbuffer)
@@ -259,19 +251,19 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
                 // disable frame showing until early initialization is complete
                 vbe_set_present_enabled(0);
                 vbec_init_console();
-                kprintf("\nsse enabled\nkernel_main: kernel started with active interrupts (block 0, 1, 14, 15 by default)\n");
-                kprintf("vbec: framebuffer console %ux%u 16 colors initialized\n\n", vbe_get_width() / 9, vbe_get_height() / 16);
+                klog_printf("kernel_main: kernel started with active interrupts (block 0, 1, 14,15 by default)\n");
+                klog_printf("framebuffer console %ux%u 16 colors initialized\n\n", vbe_get_width() / 9, vbe_get_height() / 16);
         } else {
                 vga_init();
                 vga_clear(7, 0);
-                kprintf("vga: text console 80x25 16 colors initialized\n\n");
+                klog_printf("vga: text console 80x25 16 colors initialized\n\n");
         }
         ps2_keyboard_init();
 
-        kprintf("-- entix kernel v0.10.0d\n");
+        klog_printf("ent!x kernel v0.10.0d\n");
         
         thread_init();
-        kprintf("thread_init: manager is ready\n");
+        klog_printf("thread_init: Thread manager is ready\n");
         // swap экрана выполняется только из PIT
 
         ata_init();
@@ -294,7 +286,7 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
                         // Also dump recent allocation history for context
                         extern void dump_alloc_history();
                         dump_alloc_history();
-                        kprintf("fatal: kmalloc_aligned failed; halted\n");
+                        klog_printf("fatal: kmalloc_aligned failed; halted\n");
                         for (;;);
                 }
         }
@@ -309,13 +301,18 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
         }
         tss_set_rsp0(kstack_top);
         PrintfQEMU("[tss] rsp0 set to 0x%llx\n", (unsigned long long)kstack_top);
+        // Обновим стек для входа SYSCALL (используется syscall_entry.S)
+        extern uint64_t syscall_kernel_rsp0;
+        syscall_kernel_rsp0 = kstack_top;
 
         syscall_init();
         PrintQEMU("[syscall] init x86_64 SYSCALL...\n");
         syscall_x64_init();
-        kprintf("syscalls: ready to fire\n");
+        klog_printf("syscalls: ready to fire\n");
         // Прерывания включим после монтирования VFS, чтобы исключить ранние IRQ во время парсинга cpio
         
+        // Initialize and print system information in Unix dmesg style
+        sysinfo_init();
 
         // Если модуль CPIO лежит за пределами ранней identity‑map (например, 0x60000000+),
         // промапим его идентично на время монтирования, затем VFS скопирует данные в heap
@@ -332,31 +329,36 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
 
         // Монтируем VFS из модуля Multiboot2, если он передан; иначе — попытка из FAT32
         if (g_bzbx_mod_size) {
-                kprintf("mnt_from_cpio: mounting cpio from module, start=0x%llx size=%llu\n",
+                klog_printf("mnt_from_cpio: mounting cpio from module, start=0x%llx size=%llu\n",
                                    (unsigned long long)g_bzbx_mod_start,
                                    (unsigned long long)g_bzbx_mod_size);
                 int mrc = vfs_mount_from_cpio((const void*)g_bzbx_mod_start, (unsigned long)g_bzbx_mod_size);
-                if (mrc != 0) { kprintf("vfs: fatal: mount failed, rc=%d\n", mrc); for(;;); }
+                if (mrc != 0) { klog_printf("vfs: fatal: mount failed, rc=%d\n", mrc); for(;;); }
                 fs_interface_t* ifs = vfs_get_interface();
-                if (!ifs) { kprintf("vfs: fatal: interface is null\n"); for(;;); }
+                if (!ifs) { klog_printf("vfs: fatal: interface is null\n"); for(;;); }
                 // sanity-check critical ops to avoid jumping through null pointers later
                 if (!ifs->open || !ifs->read || !ifs->seek || !ifs->close || !ifs->opendir || !ifs->readdir || !ifs->closedir) {
-                        kprintf("vfs: fatal: interface has null ops\n");
+                        klog_printf("vfs: fatal: interface has null ops\n");
                         for(;;);
                 }
         fs_set_current(ifs);
         }
-        else { kprintf("failed to mount busybox module; kernel unable to start"); for (;;); }
-        asm volatile ("sti");
+        else { klog_printf("failed to mount cpio module; kernel unable to start"); for (;;); }
         if (vbe_is_initialized()) vbe_set_present_enabled(1);
-        //const char* argv_fallback[] = { "busybox", "sh", nullptr };
+        asm volatile ("sti");
+        const char* argv_fallback[] = { "busybox", "sh", "-i", nullptr };
         //(void)kexecve("/bin/busybox", argv_fallback);
+        klog_printf("kexecve: executing busybox shell\n");
         
         // idle kernel process
-        char buf[2048];
+        int i;
+        int j;
         for(;;) {
-                kprintf("enter: ");
-                kgets(buf, 2048);
-                kprintf("you entered: %s\n", buf);
+                if (i % 256) i = 0;
+                if (j % 16) j = 0;
+                vbec_put_cell(80, 0, '!', j, 0);
+                i++;
+                j++;
         }
 } 
+

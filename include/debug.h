@@ -1,12 +1,16 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdarg.h>
 
 // We're using cpp lol so i dont know the purpose of this
 #ifdef __cplusplus
 extern "C" {
 #endif
 void PrintfQEMU(const char* fmt, ...);
+const char* k_get_mslog();
+int klog_printf(const char* fmt, ...);
+int klog_vprintf(const char* fmt, va_list ap);
 #ifdef __cplusplus
 }
 #endif

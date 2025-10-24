@@ -2,7 +2,7 @@
 #define SYSCALL_H
 
 #include <stdint.h>
-#include <idt.h>
+#include "idt.h"
 
 enum syscall_nr {
         SYS_READ  = 0,   // also accepts Linux ABI

@@ -25,11 +25,6 @@ enter_user_mode_asm:
         cli
 
         // IRET frame: SS, RSP, RFLAGS, CS, RIP
-        // Load user data selectors before switching to ring3
-        mov %dx, %ds
-        mov %dx, %es
-        mov %dx, %fs
-        mov %dx, %gs
         pushq %rdx                           // SS (user_ds|3)
         pushq %rsi                           // RSP (user stack)
         pushq %rax                           // RFLAGS (with IF)

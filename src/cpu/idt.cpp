@@ -275,6 +275,15 @@ static void gp_fault_handler(cpu_registers_t* regs){
 extern "C" void isr_dispatch(cpu_registers_t* regs) {
         uint8_t vec = (uint8_t)regs->interrupt_number;
 
+        // Если пришёл IRQ1 (клавиатура) — гарантируем EOI даже при отсутствии обработчика
+        if (vec == 33) {
+                if (isr_handlers[vec]) {
+                        isr_handlers[vec](regs);
+                }
+                pic_send_eoi(1);
+                return;
+        }
+
         // IRQ 32..47: EOI required
         if (vec >= 32 && vec <= 47) {
                 if (isr_handlers[vec]) {

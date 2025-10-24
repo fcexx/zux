@@ -25,7 +25,7 @@ static void ata_wait(uint16_t base) {
                         break;
                 }
                 if(--timeout == 0) {
-                        kprintf("atamgr: Timeout waiting for device\n");
+                        klog_printf("atamgr: Timeout waiting for device\n");
                         break;
                 }
                 // Даем возможность прерываниям работать
@@ -177,22 +177,22 @@ void ata_init() {
         idt_set_handler(46, ata_handler);
         idt_set_handler(47, ata_handler);
         if (ata_init_drive(ATA_PRIMARY_BASE, 0) == 0) {
-                kprintf("atamgr: found ata %s, ven: %s, ser: %s, sec: %u\n", 
-                        drives[0].name, drives[0].vendor, drives[0].serial, drives[0].sectors);
+                klog_printf("ata: %s, ven: %s, sec: %u\n", 
+                        drives[0].name, drives[0].vendor, drives[0].sectors);
         }
         
         if (ata_init_drive(ATA_PRIMARY_BASE, 1) == 0) {
-                kprintf("atamgr: found ata %s, ven: %s, sec: %u\n", 
+                klog_printf("ata: %s, ven: %s, sec: %u\n", 
                         drives[1].name, drives[1].vendor, drives[1].sectors);
         }
         
         if (ata_init_drive(ATA_SECONDARY_BASE, 0) == 0) {
-                kprintf("atamgr: found ata %s, ven: %s, sec: %u\n", 
+                klog_printf("ata: %s, ven: %s, sec: %u\n", 
                         drives[2].name, drives[2].vendor, drives[2].sectors);
         }
         
         if (ata_init_drive(ATA_SECONDARY_BASE, 1) == 0) {
-                kprintf("atamgr: found ata %s, ven: %s, sec: %u\n", 
+                klog_printf("ata: %s, ven: %s, sec: %u\n", 
                         drives[3].name, drives[3].vendor,  drives[3].sectors);
         }
         // После полной инициализации контроллера можно разрешить его IRQ
@@ -203,7 +203,7 @@ void ata_init() {
 // Улучшенная версия чтения сектора с поддержкой асинхронности
 int ata_read_sector(uint8_t drive, uint32_t lba, uint8_t* buffer) {
         if (drive >= 4 || !drives[drive].present) {
-                PrintfQEMU("atamgr: error read: bad drive %u\n", drive);
+                klog_printf("ata: error read: bad drive %u\n", drive);
                 return -1;
         }
         
@@ -226,13 +226,13 @@ int ata_read_sector(uint8_t drive, uint32_t lba, uint8_t* buffer) {
         do {
                 status = inb(base + ATA_STATUS);
                 if (--timeout == 0) {
-                        PrintfQEMU("atamgr: error read: BSY timeout lba=%u status=0x%02x\n", lba, status);
+                        klog_printf("ata: error read: BSY timeout lba=%u status=0x%02x\n", lba, status);
                         return -1;
                 }
         } while (status & ATA_SR_BSY);
 
         if (ata_check_error(base)) {
-                PrintfQEMU("atamgr: error read: ERR after BSY clear lba=%u status=0x%02x\n", lba, status);
+                klog_printf("ata: error read: ERR after BSY clear lba=%u status=0x%02x\n", lba, status);
                 return -1;
         }
 
@@ -241,13 +241,13 @@ int ata_read_sector(uint8_t drive, uint32_t lba, uint8_t* buffer) {
         do {
                 status = inb(base + ATA_STATUS);
                 if (--timeout == 0) {
-                        PrintfQEMU("atamgr: error read: DRQ timeout lba=%u status=0x%02x\n", lba, status);
+                        klog_printf("ata: error read: DRQ timeout lba=%u status=0x%02x\n", lba, status);
                         return -1;
                 }
         } while (!(status & ATA_SR_DRQ) && !(status & ATA_SR_ERR));
 
         if (status & ATA_SR_ERR) {
-                PrintfQEMU("atamgr: error read: DRQ error lba=%u status=0x%02x\n", lba, status);
+                klog_printf("ata: error read: DRQ error lba=%u status=0x%02x\n", lba, status);
                 return -1;
         }
 
@@ -267,7 +267,7 @@ void ata_demo_async_operations() {
         
         // Запускаем две асинхронные операции чтения
         if (ata_read_sector_async(0, 0, buffer1) == 0) {
-                kprintf("atamgr: Started async read of sector 0\n");
+                klog_printf("ata: Started async read of sector 0\n");
         }
         
         if (ata_read_sector_async(0, 1, buffer2) == 0) {

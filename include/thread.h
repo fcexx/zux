@@ -1,8 +1,8 @@
 #ifndef THREAD_H
 #define THREAD_H
 #include <stdint.h>
-#include <context.h>
-#include <fs_interface.h>
+#include "context.h"
+#include "fs_interface.h"
 
 typedef enum {
         THREAD_READY,
