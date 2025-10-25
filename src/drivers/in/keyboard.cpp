@@ -73,10 +73,11 @@ static void add_to_buffer(char c) {
                 keyboard_buffer[buffer_tail] = c;
                 buffer_tail = (buffer_tail + 1) % KEYBOARD_BUFFER_SIZE;
                 buffer_count++;
-                // PrintfQEMU("BUFFER: added '%c', count=%d\n", c, buffer_count);
-        } else {
-                PrintfQEMU("BUFFER: full, dropped '%c'\n", c);
-        }
+                // qemu_log_printf("BUFFER: added '%c', count=%d\n", c, buffer_count);
+        } 
+        // else {
+        //         qemu_log_printf("BUFFER: full, dropped '%c'\n", c);
+        // }
         release(&keyboard_lock);
 }
 
@@ -89,9 +90,9 @@ static char get_from_buffer() {
                 c = keyboard_buffer[buffer_head];
                 buffer_head = (buffer_head + 1) % KEYBOARD_BUFFER_SIZE;
                 buffer_count--;
-                // PrintfQEMU("BUFFER: got '%c', count=%d\n", c, buffer_count);
+                // qemu_log_printf("BUFFER: got '%c', count=%d\n", c, buffer_count);
         } else {
-                PrintfQEMU("BUFFER: empty\n");
+                qemu_log_printf("BUFFER: empty\n");
         }
         
         release(&keyboard_lock);
@@ -102,7 +103,7 @@ static char get_from_buffer() {
 // Обработчик прерывания клавиатуры
 extern "C" void keyboard_handler(cpu_registers_t* regs) {
         uint8_t scancode = inb(0x60);
-        //PrintfQEMU("[KEYBOARD] scancode=0x%02x\n", scancode);
+        //qemu_log_printf("[KEYBOARD] scancode=0x%02x\n", scancode);
         
         // Обрабатываем только нажатие клавиш (не отпускание)
         if (scancode & 0x80) {
@@ -237,7 +238,7 @@ char* kgets(char* buffer, int max_length) {
         
         while (1) {
                 char c = kgetc();
-                // PrintfQEMU("kgets got char: %d\n", c);
+                // qemu_log_printf("kgets got char: %d\n", c);
                 
                 if (c == 0) {
                         // Нет символов - ждем немного

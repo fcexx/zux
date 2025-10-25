@@ -31,18 +31,18 @@ void pit_handler(cpu_registers_t* regs) {
 
 // Initialize PIT with default frequency (100 Hz)
 void pit_init() {
-        PrintfQEMU("Initializing PIT timer...\n");
+        qemu_log_printf("Initializing PIT timer...\n");
         
         // Set default frequency (1000 Hz)
         int freq = 1000;
         pit_set_frequency(freq);
         kprintf("pit_timer: freq at %u\n", freq);
-        PrintfQEMU("DEBUG: pit_frequency = %u\n", pit_frequency);
+        qemu_log_printf("DEBUG: pit_frequency = %u\n", pit_frequency);
         // Set up PIT handler for IRQ 0
         idt_set_handler(32, pit_handler); // IRQ 0 = vector 32
         
         
-        PrintfQEMU("PIT initialized at %u Hz\n", pit_frequency);
+        qemu_log_printf("PIT initialized at %u Hz\n", pit_frequency);
 }
 
 // Set PIT frequency in Hz
@@ -62,13 +62,15 @@ void pit_set_frequency(uint32_t frequency) {
         // Set the divisor
         pit_set_divisor((uint16_t)divisor);
         
-        PrintfQEMU("PIT frequency set to %u Hz (divisor: %u)\n", pit_frequency, divisor);
+        qemu_log_printf("PIT frequency set to %u Hz (divisor: %u)\n", pit_frequency, divisor);
 }
 
 // Set PIT divisor directly
 void pit_set_divisor(uint16_t divisor) {
         // Send command byte
-        outb(PIT_COMMAND, PIT_CMD_CHANNEL0 | PIT_CMD_ACCESS_BOTH | PIT_CMD_MODE3 | PIT_CMD_BINARY);
+        // Use MODE2 (rate generator) to have linear down-counting, which simplifies
+        // reading the current counter value for time interpolation
+        outb(PIT_COMMAND, PIT_CMD_CHANNEL0 | PIT_CMD_ACCESS_BOTH | PIT_CMD_MODE2 | PIT_CMD_BINARY);
         
         // Send divisor (low byte first, then high byte)
         outb(PIT_CHANNEL0, divisor & 0xFF);
@@ -77,14 +79,12 @@ void pit_set_divisor(uint16_t divisor) {
 
 // Get current PIT count
 uint16_t pit_get_current_count() {
-        // Send command to latch current count
-        outb(PIT_COMMAND, PIT_CMD_CHANNEL0 | PIT_CMD_ACCESS_BOTH);
-        
-        // Read count (low byte first, then high byte)
-        uint16_t count = inb(PIT_CHANNEL0);
-        count |= (uint16_t)inb(PIT_CHANNEL0) << 8;
-        
-        return count;
+        // Latch current count (counter latch command: channel0 + access=00)
+        outb(PIT_COMMAND, PIT_CMD_CHANNEL0);
+        // Read latched count (low then high)
+        uint16_t lo = inb(PIT_CHANNEL0);
+        uint16_t hi = inb(PIT_CHANNEL0);
+        return (uint16_t)((hi << 8) | lo);
 }
 
 // Sleep for specified number of milliseconds

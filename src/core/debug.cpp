@@ -32,7 +32,17 @@ void PrintQEMU(const char* str) {
         }
 }
 
-void PrintfQEMU(const char* format, ...) {
+void outl(uint16_t port, uint32_t val) {
+        asm volatile("outl %0, %1" : : "a"(val), "Nd"(port));
+}
+
+uint32_t inl(uint16_t port) {
+        uint32_t ret;
+        asm volatile("inl %1, %0" : "=a"(ret) : "Nd"(port));
+        return ret;
+}
+
+extern "C" void qemu_log_printf(const char* format, ...) {
         va_list args;
         va_start(args, format);
         
@@ -381,31 +391,50 @@ void PrintfQEMU(const char* format, ...) {
 } 
 
 static char g_mslog_buf[32];
-const char* k_get_mslog(){
+static uint64_t g_time_us_base = 0;
+static int g_time_base_set = 0;
+extern "C" void klog_reset_time_base(void){ g_time_base_set = 0; g_time_us_base = 0; }
+extern "C" const char* k_get_mslog(){
         // формат как в Linux: "   0.000000" с 6 дробными знаками
-        // используем pit_ticks и pit_frequency
-        uint64_t ticks = pit_ticks;
-        uint32_t freq = pit_frequency ? pit_frequency : 1000;
-        // секунды и микросекунды
-        uint64_t sec = (freq ? (ticks / freq) : 0);
-        uint64_t rem = (freq ? (ticks % freq) : 0);
-        uint64_t usec = (freq ? (rem * 1000000ULL) / freq : 0);
-        // соберём строку: три ведущих пробела выравнивания, как [   0.000000]
-        // наполним буфер
+        // точность повышаем, читая текущий счётчик PIT для доли тика
+        uint32_t freq = pit_frequency ? pit_frequency : 1000; // Гц
+        if (freq == 0) freq = 1000;
+        uint32_t divisor = PIT_FREQUENCY / freq; if (divisor == 0) divisor = 1;
+
+        // Грубое количество тиков и текущее значение счётчика
+        uint64_t ticks_snapshot = pit_ticks;
+        uint16_t cnt = pit_get_current_count();
+
+        // В режиме 2 (rate generator) счётчик монотонно убывает от divisor до 1 и опять перезагружается
+        // Используем прошедшую часть тика как (divisor - cnt)
+        uint32_t within = (divisor - (uint32_t)cnt);
+        if (within >= divisor) within = 0;
+
+        // Итоговое время в микросекундах: целые тики + доля тика
+        // Время, прошедшее по целым тикам (1/freq сек каждый)
+        uint64_t total_us = (ticks_snapshot * 1000000ULL) / (uint64_t)freq;
+        // Плюс доля тика, измеренная напрямую в тактах базовой частоты PIT
+        total_us += ((uint64_t)within * 1000000ULL) / (uint64_t)PIT_FREQUENCY;
+
+        // Приведём отметку к времени относительно первой записи лога,
+        // чтобы стартовать с 0.000000 как в dmesg
+        if (!g_time_base_set){ g_time_us_base = total_us; g_time_base_set = 1; }
+        uint64_t rel_us = (total_us >= g_time_us_base) ? (total_us - g_time_us_base) : 0;
+
+        uint64_t sec = rel_us / 1000000ULL;
+        uint32_t usec = (uint32_t)(rel_us % 1000000ULL);
+
+        // собрать строку с выравниванием секунд до 4 позиций
         char* p = g_mslog_buf;
-        // выравнивание сек до 4 позиций пробелами (минимум 1)
-        // посчитаем длину sec
-        char tmp[24]; int ti=0; uint64_t s=sec; if (s==0) tmp[ti++]='0'; else { while(s){ tmp[ti++] = '0' + (s%10); s/=10; } }
+        char tmp[24]; int ti=0; uint64_t s=sec; if (s==0) tmp[ti++]='0'; else { while(s){ tmp[ti++] = (char)('0' + (s%10)); s/=10; } }
         int pad = 4 - ti; if (pad < 1) pad = 1; while (pad--) *p++ = ' ';
         while (ti) *p++ = tmp[--ti];
         *p++ = '.';
-        // шесть цифр usec
-        uint64_t u = usec;
-        // ведущие нули
+        // шесть цифр usec с ведущими нулями
         uint32_t divs[6] = {100000,10000,1000,100,10,1};
         for (int i=0;i<6;i++){
                 uint32_t d = divs[i];
-                uint32_t digit = (uint32_t)((u / d) % 10);
+                uint32_t digit = (usec / d) % 10U;
                 *p++ = (char)('0' + digit);
         }
         *p = '\0';
@@ -423,7 +452,7 @@ static void klog_write_prefix_buf(char* dst, size_t cap){
         dst[i] = '\0';
 }
 static char buf[1024];
-int klog_vprintf(const char* fmt, va_list ap){
+extern "C" int klog_vprintf(const char* fmt, va_list ap){
         if (!fmt) return 0;
         // Сформируем строку в локальный буфер и выведем через kprintf (экран+VFS) buf[0] = '\0';
         char* p = buf;
@@ -477,4 +506,4 @@ int klog_vprintf(const char* fmt, va_list ap){
         return (int)strlen(buf);
 }
 
-int klog_printf(const char* fmt, ...){ va_list ap; va_start(ap, fmt); int r = klog_vprintf(fmt, ap); va_end(ap); return r; }
+extern "C" int klog_printf(const char* fmt, ...){ va_list ap; va_start(ap, fmt); int r = klog_vprintf(fmt, ap); va_end(ap); return r; }

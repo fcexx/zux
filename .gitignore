@@ -7,9 +7,9 @@ build/
 *.map
 
 # Disk images and VM artifacts
-entix.img
-entix.vmdk
-entix.vmdk.lck/
+zux.img
+zux.vmdk
+zux.vmdk.lck/
 *.img
 *.vmdk
 
@@ -22,7 +22,7 @@ toolchains/
 # Local binaries copied into hda (runtime-only)
 hda/bin/
 # Keep kernel image in repo if you want; comment next line to track it
-# hda/boot/entixImg
+# hda/boot/zuxImg
 
 # Editor/OS junk
 .DS_Store

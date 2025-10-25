@@ -77,7 +77,7 @@ void HeapAllocator::add_to_free_list(heap_block_header* block) {
         size_t bucket = get_bucket_index(block->size);
         if (bucket >= NUM_BUCKETS) return;
         
-        // PrintfQEMU("[heap] add_to_free_list: block=%p size=%zu bucket=%zu\n", block, block->size, bucket);
+        // qemu_log_printf("[heap] add_to_free_list: block=%p size=%zu bucket=%zu\n", block, block->size, bucket);
         
         // Insert at head for better cache performance
         block->next = free_lists[bucket];
@@ -114,7 +114,7 @@ void HeapAllocator::remove_from_free_list(heap_block_header* block) {
 // Find best fit block in free list using binary search optimization
 heap_block_header* HeapAllocator::find_best_fit(size_t size) {
         size_t bucket = get_bucket_index(size);
-        // PrintfQEMU("[heap] find_best_fit: request=%zu bucket=%zu\n", size, bucket);
+        // qemu_log_printf("[heap] find_best_fit: request=%zu bucket=%zu\n", size, bucket);
         
         if (bucket >= NUM_BUCKETS) {
                 bucket = NUM_BUCKETS - 1;
@@ -137,13 +137,13 @@ heap_block_header* HeapAllocator::find_best_fit(size_t size) {
                                 break;
                         }
                         if (validate_block(head) && head->is_free && head->size >= size) {
-                                // PrintfQEMU("[heap] find_best_fit: found block=%p size=%zu in bucket=%zu\n", head, head->size, b);
+                                // qemu_log_printf("[heap] find_best_fit: found block=%p size=%zu in bucket=%zu\n", head, head->size, b);
                                 return head;
                         }
                         head = head->next;
                 }
                 // if (count > 0) {
-                //         PrintfQEMU("[heap] find_best_fit: bucket=%zu has %d blocks, none suitable\n", b, count);
+                //         qemu_log_printf("[heap] find_best_fit: bucket=%zu has %d blocks, none suitable\n", b, count);
                 // }
         }
         
@@ -174,7 +174,7 @@ heap_block_header* HeapAllocator::split_block(heap_block_header* block, size_t r
         if (remaining_size < MIN_BLOCK_SIZE + sizeof(heap_block_header)) {
                 remove_from_free_list(block);
                 block->is_free = 0;
-                //PrintfQEMU("[heap] split_block: no-split, use whole block size=%zu\n", block->size);
+                //qemu_log_printf("[heap] split_block: no-split, use whole block size=%zu\n", block->size);
                 return block;
         }
         
@@ -210,7 +210,7 @@ static const size_t CANARY_SIZE = sizeof(uint64_t);
 // Merge adjacent free blocks (optimized for minimal overhead)
 void HeapAllocator::merge_blocks(heap_block_header* block) {
         if (!block || !validate_block(block)) return;
-        //PrintfQEMU("[heap] merge_blocks: block=%p size=%zu\n", block, block->size);
+        //qemu_log_printf("[heap] merge_blocks: block=%p size=%zu\n", block, block->size);
         
         // Try to merge with next block
         heap_block_header* next_block = reinterpret_cast<heap_block_header*>(
@@ -218,7 +218,7 @@ void HeapAllocator::merge_blocks(heap_block_header* block) {
         );
         
         if (next_block <= heap_end && validate_block(next_block) && next_block->is_free) {
-                //PrintfQEMU("[heap]  merge with next=%p size=%zu\n", next_block, next_block->size);
+                //qemu_log_printf("[heap]  merge with next=%p size=%zu\n", next_block, next_block->size);
                 // Remove both blocks from free lists
                 remove_from_free_list(block);
                 remove_from_free_list(next_block);
@@ -243,7 +243,7 @@ void HeapAllocator::merge_blocks(heap_block_header* block) {
                         
                         if (potential_next == block) {
                                 if (validate_block(prev_block) && prev_block->is_free) {
-                                        //PrintfQEMU("[heap]  merge with prev=%p size=%zu\n", prev_block, prev_block->size);
+                                        //qemu_log_printf("[heap]  merge with prev=%p size=%zu\n", prev_block, prev_block->size);
                                         // Remove both blocks from free lists
                                         remove_from_free_list(prev_block);
                                         remove_from_free_list(block);
@@ -268,17 +268,17 @@ void HeapAllocator::merge_blocks(heap_block_header* block) {
 bool HeapAllocator::validate_block(const heap_block_header* block) const {
         if (!block) return false;
         if (block->magic != MAGIC_NUMBER) {
-                PrintfQEMU("[heap VALIDATE] bad magic: block=%p magic=0x%08x expected=0x%08x\n",
+                qemu_log_printf("[heap VALIDATE] bad magic: block=%p magic=0x%08x expected=0x%08x\n",
                                    block, block->magic, MAGIC_NUMBER);
                 // Dump nearby memory for diagnosis (preserve const)
                 const uint8_t* p = reinterpret_cast<const uint8_t*>(block) - 32;
-                PrintfQEMU("[heap VALIDATE] nearby: "); for (int i=0;i<96;i++) PrintfQEMU("%02x ", p[i]); PrintfQEMU("\n");
+                qemu_log_printf("[heap VALIDATE] nearby: "); for (int i=0;i<96;i++) qemu_log_printf("%02x ", p[i]); qemu_log_printf("\n");
                 return false;
         }
         // Basic range check
         const uint8_t* bptr = reinterpret_cast<const uint8_t*>(block);
         if (bptr < heap_mem_start || bptr > heap_mem_end) {
-                PrintfQEMU("[heap VALIDATE] block out of range: block=%p heap_start=%p heap_end=%p\n", block, heap_mem_start, heap_mem_end);
+                qemu_log_printf("[heap VALIDATE] block out of range: block=%p heap_start=%p heap_end=%p\n", block, heap_mem_start, heap_mem_end);
                 return false;
         }
         return true;
@@ -295,7 +295,7 @@ bool HeapAllocator::expand_heap(size_t additional_size) {
         void* new_memory = nullptr; // pmm_alloc_pages(pages_needed);
         
         // Temporarily disable heap expansion to avoid hangs
-        PrintfQEMU("[heap] expand_heap disabled: request=%zu pages=%zu\n", additional_size, pages_needed);
+        qemu_log_printf("[heap] expand_heap disabled: request=%zu pages=%zu\n", additional_size, pages_needed);
         return false;
         
         // Map the new memory
@@ -324,12 +324,12 @@ bool HeapAllocator::expand_heap(size_t additional_size) {
 // Main allocation function with small object optimization
 void* HeapAllocator::malloc(size_t size) {
         if (size == 0) return nullptr;
-        //PrintfQEMU("[heap] kmalloc: size=%zu\n", size);
+        //qemu_log_printf("[heap] kmalloc: size=%zu\n", size);
         
         // Use memory pool for small allocations
         if (size <= SMALL_SIZES[sizeof(SMALL_SIZES)/sizeof(SMALL_SIZES[0]) - 1]) {
                 void* p = allocate_small(size);
-                //PrintfQEMU("[heap]  small-alloc: size=%zu -> %p\n", size, p);
+                //qemu_log_printf("[heap]  small-alloc: size=%zu -> %p\n", size, p);
                 return p;
         }
         
@@ -337,10 +337,10 @@ void* HeapAllocator::malloc(size_t size) {
         heap_block_header* block = find_best_fit(size);
         
         if (!block) {
-                //PrintfQEMU("[heap]  expand_heap: request=%zu\n", size);
+                //qemu_log_printf("[heap]  expand_heap: request=%zu\n", size);
                 // Try to expand heap
                 if (!expand_heap(size + sizeof(heap_block_header))) {
-                        //PrintfQEMU("[heap]  expand_heap FAILED\n");
+                        //qemu_log_printf("[heap]  expand_heap FAILED\n");
                         return nullptr;
                 }
                 block = find_best_fit(size);
@@ -359,7 +359,7 @@ void* HeapAllocator::malloc(size_t size) {
         }
         
         void* user = reinterpret_cast<uint8_t*>(block) + sizeof(heap_block_header);
-        //PrintfQEMU("[heap] kmalloc: -> %p (block=%p size=%zu)\n", user, block, block->size);
+        //qemu_log_printf("[heap] kmalloc: -> %p (block=%p size=%zu)\n", user, block, block->size);
         return user;
 }
 
@@ -373,20 +373,15 @@ void* HeapAllocator::malloc_aligned(size_t size, size_t alignment) {
         // Calculate required size including alignment overhead
         size_t required_size = size + alignment - 1 + sizeof(heap_block_header);
         
-        PrintfQEMU("[heap] malloc_aligned: size=%zu alignment=%zu required=%zu\n", size, alignment, required_size);
-        
         // Allocate larger block
         heap_block_header* block = find_best_fit(required_size);
         if (!block) {
-                PrintfQEMU("[heap] malloc_aligned: no block found for %zu bytes\n", required_size);
                 // Try to expand heap
                 if (!expand_heap(required_size)) {
-                        PrintfQEMU("[heap] malloc_aligned: expand_heap failed for %zu bytes\n", required_size);
                         return nullptr;
                 }
                 block = find_best_fit(required_size);
                 if (!block) {
-                        PrintfQEMU("[heap] malloc_aligned: still no block after expansion\n");
                         return nullptr;
                 }
         }
@@ -468,14 +463,14 @@ void HeapAllocator::mfree(void* ptr) {
                 }
         }
         
-        if (!is_valid_pointer(ptr)) { /*PrintfQEMU("[heap] kfree: invalid ptr=%p\n", ptr); */ return; }
+        if (!is_valid_pointer(ptr)) { /*qemu_log_printf("[heap] kfree: invalid ptr=%p\n", ptr); */ return; }
         
         // Compute header address from user pointer
         heap_block_header* block = reinterpret_cast<heap_block_header*>(
                 reinterpret_cast<uint8_t*>(ptr) - sizeof(heap_block_header)
         );
         
-        if (!validate_block(block)) { /* //PrintfQEMU("[heap] kfree: bad magic for ptr=%p\n", ptr); */ return; }
+        if (!validate_block(block)) { /* //qemu_log_printf("[heap] kfree: bad magic for ptr=%p\n", ptr); */ return; }
         
         // For now no canary check (removed) — keep placeholder for future instrumentation
 
@@ -485,7 +480,7 @@ void HeapAllocator::mfree(void* ptr) {
 
         // Mark as free
         block->is_free = 1;
-        //PrintfQEMU("[heap] kfree: ptr=%p block=%p size=%zu\n", ptr, block, block->size);
+        //qemu_log_printf("[heap] kfree: ptr=%p block=%p size=%zu\n", ptr, block, block->size);
         
         // Merge with adjacent blocks
         merge_blocks(block);

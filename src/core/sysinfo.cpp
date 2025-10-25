@@ -1,8 +1,11 @@
 #include <sysinfo.h>
 #include <debug.h>
-#include <multiboot2.h>
 #include <string.h>
 #include <pit.h>
+#include <stdint.h>
+#include <multiboot2.h>
+
+// Use multiboot2 constants from header file
 
 // Global system information
 static system_info_t g_system_info;
@@ -182,14 +185,163 @@ static void get_cpu_topology() {
     }
 }
 
+// Helper function to get SMBIOS string
+static char* get_smbios_string(uint8_t* structure, uint8_t index) {
+    if (index == 0) return nullptr;
+
+    uint8_t* strings_start = structure + structure[1];
+    uint8_t current_index = 1;
+
+    while (current_index < index && strings_start[0] != 0) {
+        strings_start += strlen((char*)strings_start) + 1;
+        current_index++;
+    }
+
+    if (current_index == index) {
+        return (char*)strings_start;
+    }
+
+    return nullptr;
+}
+
 // Detect firmware type (BIOS vs UEFI)
-static void detect_firmware() {
-    // Check multiboot2 tags for firmware info
-    // For now, assume BIOS since we're using GRUB in BIOS mode
-    // In a real implementation, we'd parse multiboot2 tags for EFI information
-    strcpy(g_system_info.firmware_type, "BIOS");
-    strcpy(g_system_info.firmware_vendor, "GRUB");
-    strcpy(g_system_info.firmware_version, "2.06");
+static void detect_firmware(uint64_t multiboot2_info_ptr) {
+    // Default values
+    strcpy(g_system_info.firmware_type, "Unknown");
+    strcpy(g_system_info.firmware_vendor, "Unknown");
+    strcpy(g_system_info.firmware_version, "Unknown");
+
+    if (multiboot2_info_ptr == 0) {
+        return;
+    }
+
+    uint8_t* tag_ptr = (uint8_t*)(multiboot2_info_ptr + 8);
+    while (1) {
+        uint32_t tag_type = *(uint32_t*)tag_ptr;
+        uint32_t tag_size = *(uint32_t*)(tag_ptr + 4);
+
+        if (tag_type == 0) break;
+
+        switch (tag_type) {
+            case 2: {  // MULTIBOOT2_TAG_TYPE_LOADER_NAME
+                // Bootloader name
+                char* loader_string = (char*)(tag_ptr + 8);
+                strncpy(g_system_info.firmware_vendor, loader_string, sizeof(g_system_info.firmware_vendor) - 1);
+                g_system_info.firmware_vendor[sizeof(g_system_info.firmware_vendor) - 1] = '\0';
+                break;
+            }
+
+            case 11:  // MULTIBOOT2_TAG_TYPE_EFI32
+            case 12:  // MULTIBOOT2_TAG_TYPE_EFI64
+            case 18:  // MULTIBOOT2_TAG_TYPE_EFI32_IH
+            case 19:  // MULTIBOOT2_TAG_TYPE_EFI64_IH
+            case 17:  // MULTIBOOT2_TAG_TYPE_EFI_MMAP
+            case 21: {  // MULTIBOOT2_TAG_TYPE_EFI_BS_NOT_TERMINATED
+                // EFI firmware detected
+                strcpy(g_system_info.firmware_type, "UEFI");
+                break;
+            }
+
+            case 13: {  // MULTIBOOT2_TAG_TYPE_SMBIOS
+                // SMBIOS tables contain detailed firmware info
+                strcpy(g_system_info.firmware_type, "BIOS");
+
+                // SMBIOS version
+                uint8_t major = *(uint8_t*)(tag_ptr + 8);
+                uint8_t minor = *(uint8_t*)(tag_ptr + 9);
+                {
+                    char temp[16];
+                    temp[0] = '0' + major / 10;
+                    temp[1] = '0' + major % 10;
+                    temp[2] = '.';
+                    temp[3] = '0' + minor / 10;
+                    temp[4] = '0' + minor % 10;
+                    temp[5] = '\0';
+                    strncpy(g_system_info.firmware_version, temp, sizeof(g_system_info.firmware_version) - 1);
+                    g_system_info.firmware_version[sizeof(g_system_info.firmware_version) - 1] = '\0';
+                }
+
+                // Parse SMBIOS tables for vendor info
+                uint8_t* smbios_tables = tag_ptr + 16;
+                uint8_t* smbios_end = tag_ptr + tag_size;
+
+                // Skip SMBIOS header and look for BIOS Information structure (type 0)
+                if (smbios_tables + 4 <= smbios_end) {
+                    uint8_t* table = smbios_tables + 4;  // Skip entry point header
+                    while (table + 4 <= smbios_end) {
+                        uint8_t type = table[0];
+                        uint8_t length = table[1];
+
+                        if (type == 0 && length >= 0x12) {  // BIOS Information structure
+                            // BIOS Vendor (string at offset 4)
+                            uint8_t vendor_idx = table[4];
+                            if (vendor_idx > 0) {
+                                char* vendor_str = get_smbios_string(table, vendor_idx);
+                                if (vendor_str) {
+                                    strncpy(g_system_info.firmware_vendor, vendor_str, sizeof(g_system_info.firmware_vendor) - 1);
+                                    g_system_info.firmware_vendor[sizeof(g_system_info.firmware_vendor) - 1] = '\0';
+                                }
+                            }
+
+                            // BIOS Version (string at offset 5)
+                            uint8_t version_idx = table[5];
+                            if (version_idx > 0) {
+                                char* version_str = get_smbios_string(table, version_idx);
+                                if (version_str) {
+                                    strncpy(g_system_info.firmware_version, version_str, sizeof(g_system_info.firmware_version) - 1);
+                                    g_system_info.firmware_version[sizeof(g_system_info.firmware_version) - 1] = '\0';
+                                }
+                            }
+
+                            // BIOS Release Date (string at offset 8)
+                            uint8_t release_idx = table[8];
+                            if (release_idx > 0) {
+                                char* release_str = get_smbios_string(table, release_idx);
+                                if (release_str) {
+                                    // Append release date to version
+                                    strncat(g_system_info.firmware_version, " (", sizeof(g_system_info.firmware_version) - strlen(g_system_info.firmware_version) - 1);
+                                    strncat(g_system_info.firmware_version, release_str, sizeof(g_system_info.firmware_version) - strlen(g_system_info.firmware_version) - 1);
+                                    strncat(g_system_info.firmware_version, ")", sizeof(g_system_info.firmware_version) - strlen(g_system_info.firmware_version) - 1);
+                                }
+                            }
+                            break;  // Found BIOS info, stop looking
+                        }
+
+                        // Move to next structure
+                        if (type == 127) {  // End of table marker
+                            break;
+                        }
+
+                        // Calculate next table position
+                        uint8_t* strings_start = table + length;
+                        while (strings_start < smbios_end && *(uint16_t*)strings_start != 0) {
+                            strings_start += strlen((char*)strings_start) + 1;
+                        }
+                        strings_start += 2;  // Skip the double null terminator
+                        table = strings_start;
+                    }
+                }
+                break;
+            }
+
+            case 15: {  // MULTIBOOT2_TAG_TYPE_ACPI_NEW
+                // ACPI RSDP - indicates modern firmware
+                strcpy(g_system_info.firmware_type, "UEFI");
+                strcpy(g_system_info.firmware_vendor, "ACPI-compatible");
+                break;
+            }
+
+            case 14: {  // MULTIBOOT2_TAG_TYPE_ACPI_OLD
+                // Legacy ACPI - indicates BIOS
+                strcpy(g_system_info.firmware_type, "BIOS");
+                strcpy(g_system_info.firmware_vendor, "Legacy BIOS");
+                break;
+            }
+        }
+
+        // Move to next tag
+        tag_ptr += (tag_size + 7) & ~7;
+    }
 }
 
 // Detect APIC information
@@ -227,11 +379,48 @@ static void detect_apic() {
     }
 }
 
-// Get memory information (simplified)
-static void detect_memory() {
-    // This would normally parse multiboot2 memory map or ACPI
-    // For now, use a reasonable default
-    g_system_info.memory_mb = 1024;  // 1GB default
+// Get memory information from multiboot2
+static void detect_memory(uint64_t multiboot2_info_ptr) {
+    g_system_info.memory_mb = 1024;  // Default fallback
+
+    if (multiboot2_info_ptr == 0) {
+        return;
+    }
+
+    uint8_t* tag_ptr = (uint8_t*)(multiboot2_info_ptr + 8);
+    while (1) {
+        uint32_t tag_type = *(uint32_t*)tag_ptr;
+        uint32_t tag_size = *(uint32_t*)(tag_ptr + 4);
+
+        if (tag_type == 0) break;
+
+        if (tag_type == 6) {  // MULTIBOOT2_TAG_TYPE_MMAP
+            uint64_t total_memory = 0;
+            uint32_t entry_size = *(uint32_t*)(tag_ptr + 8);
+            uint32_t entry_count = (tag_size - 16) / entry_size;
+
+            // Count available memory (type 1 = available RAM)
+            multiboot2_tag_mmap_entry* entry = (multiboot2_tag_mmap_entry*)(tag_ptr + 16);
+            for (uint32_t i = 0; i < entry_count; i++) {
+                if (entry->type == 1) {  // Available RAM
+                    total_memory += entry->len;
+                }
+                entry++;
+            }
+
+            g_system_info.memory_mb = total_memory / (1024 * 1024);
+            break;
+        }
+
+        if (tag_type == 4) {  // MULTIBOOT2_TAG_TYPE_BASIC_MEMINFO
+            uint64_t total_memory = (uint32_t)(*(uint32_t*)(tag_ptr + 8) + 1024) * 1024;  // Convert from KB to bytes
+            g_system_info.memory_mb = total_memory / (1024 * 1024);
+            break;
+        }
+
+        // Move to next tag
+        tag_ptr += (tag_size + 7) & ~7;
+    }
 }
 
 // Get CPU information
@@ -251,48 +440,100 @@ int sysinfo_get_system_info(system_info_t* info) {
 }
 
 // Print system information in Unix dmesg style
-void sysinfo_print_dmesg_style() {
+void sysinfo_print_dmesg_style(uint64_t multiboot2_info_ptr) {
+    // Command line (from multiboot2)
+    if (multiboot2_info_ptr != 0) {
+        uint8_t* tag_ptr = (uint8_t*)(multiboot2_info_ptr + 8);
+        while (1) {
+            uint32_t tag_type = *(uint32_t*)tag_ptr;
+            uint32_t tag_size = *(uint32_t*)(tag_ptr + 4);
+
+            if (tag_type == 0) break;
+
+            if (tag_type == 1) {  // MULTIBOOT2_TAG_TYPE_CMDLINE
+                char* cmdline_string = (char*)(tag_ptr + 8);
+                klog_printf("Command line: %s", cmdline_string);
+                break;
+            }
+
+            // Move to next tag
+            tag_ptr += (tag_size + 7) & ~7;
+        }
+    }
+
     // CPU information
-    klog_printf("CPU: %s", g_cpu_info.brand_string);
-    klog_printf("CPU Vendor: %s", g_cpu_info.vendor_id);
-    klog_printf("CPU Family: %u Model: %u Stepping: %u",
+    klog_printf("cpuinfo: CPU: %s", g_cpu_info.brand_string);
+    klog_printf("cpuinfo: CPU Vendor: %s", g_cpu_info.vendor_id);
+    klog_printf("cpuinfo: CPU Family: %u Model: %u Stepping: %u",
                 g_cpu_info.family, g_cpu_info.model, g_cpu_info.stepping);
-    klog_printf("CPU Cores: %u Threads: %u",
+    klog_printf("cpuinfo: CPU Cores: %u Threads: %u",
                 g_cpu_info.cores, g_cpu_info.threads);
+
+    // // CPU features
+    // klog_printf("CPU Features:");
+    // if (cpu_has_feature(CPU_FEATURE_FPU)) klog_printf(" FPU");
+    // if (cpu_has_feature(CPU_FEATURE_MMX)) klog_printf(" MMX");
+    // if (cpu_has_feature(CPU_FEATURE_SSE)) klog_printf(" SSE");
+    // if (cpu_has_feature(CPU_FEATURE_SSE2)) klog_printf(" SSE2");
+    // if (cpu_has_feature(CPU_FEATURE_SSE3)) klog_printf(" SSE3");
+    // if (cpu_has_feature(CPU_FEATURE_SSSE3)) klog_printf(" SSSE3");
+    // if (cpu_has_feature(CPU_FEATURE_SSE41)) klog_printf(" SSE4.1");
+    // if (cpu_has_feature(CPU_FEATURE_SSE42)) klog_printf(" SSE4.2");
+    // if (cpu_has_feature(CPU_FEATURE_AVX)) klog_printf(" AVX");
+    // if (cpu_has_feature(CPU_FEATURE_AVX2)) klog_printf(" AVX2");
+    // if (cpu_has_feature(CPU_FEATURE_HYPERVISOR)) klog_printf(" HYPERVISOR");
+    // if (cpu_has_feature(CPU_FEATURE_APIC)) klog_printf(" APIC");
+    // if (cpu_has_feature(CPU_FEATURE_X2APIC)) klog_printf(" x2APIC");
+    // klog_printf("");
 
     // APIC information
     if (g_system_info.has_apic) {
-        klog_printf("APIC: Present");
+        klog_printf("apicinfo: APIC: Present");
         if (g_system_info.apic_mode == 1) {
-            klog_printf("APIC: Legacy mode enabled");
+            klog_printf("apicinfo: APIC: Legacy mode enabled");
         } else if (g_system_info.apic_mode == 2) {
-            klog_printf("APIC: x2APIC mode enabled");
+            klog_printf("apicinfo: APIC: x2APIC mode enabled");
         }
         if (g_system_info.ioapic_count > 0) {
-            klog_printf("IOAPIC: %u device(s) detected",
+            klog_printf("apicinfo: IOAPIC: %u device(s) detected",
                         g_system_info.ioapic_count);
         }
     } else {
-        klog_printf("APIC: Not detected or disabled");
+        klog_printf("apicinfo: APIC: Not detected or disabled");
     }
 
     // Firmware information
-    klog_printf("Firmware: %s", g_system_info.firmware_type);
+    klog_printf("sysinfo: Firmware: %s", g_system_info.firmware_type);
     if (strcmp(g_system_info.firmware_vendor, "Unknown") != 0) {
-        klog_printf("Firmware Vendor: %s",
+        klog_printf("sysinfo: Firmware Vendor: %s",
                     g_system_info.firmware_vendor);
     }
     if (strcmp(g_system_info.firmware_version, "Unknown") != 0) {
-        klog_printf("Firmware Version: %s",
+        klog_printf("sysinfo: Firmware Version: %s",
                     g_system_info.firmware_version);
     }
 
     // Memory information
-    klog_printf("Memory: %u MB detected", g_system_info.memory_mb);
+    klog_printf("sysinfo: Memory: %u MB detected", g_system_info.memory_mb);
+
+    // Platform information
+    if (strcmp(g_system_info.firmware_type, "UEFI") == 0) {
+        klog_printf("sysinfo: Platform: UEFI system");
+    } else if (strcmp(g_system_info.firmware_type, "BIOS") == 0) {
+        klog_printf("sysinfo: Platform: Legacy BIOS system");
+    } else {
+        klog_printf("sysinfo: Platform: Unknown firmware");
+    }
 }
 
 // Initialize system information detection
 void sysinfo_init() {
+    // Use default multiboot2 info (none)
+    sysinfo_init_with_multiboot2(0);
+}
+
+// Initialize system information detection with multiboot2
+void sysinfo_init_with_multiboot2(uint64_t multiboot2_info_ptr) {
     // Clear structures
     memset(&g_cpu_info, 0, sizeof(g_cpu_info));
     memset(&g_system_info, 0, sizeof(g_system_info));
@@ -304,13 +545,13 @@ void sysinfo_init() {
     get_cpu_topology();
 
     // Detect system components
-    detect_firmware();
+    detect_firmware(multiboot2_info_ptr);
     detect_apic();
-    detect_memory();
+    detect_memory(multiboot2_info_ptr);
 
     // Copy CPU info to system info
     memcpy(&g_system_info.cpu, &g_cpu_info, sizeof(cpu_info_t));
 
     // Print system information
-    sysinfo_print_dmesg_style();
+    sysinfo_print_dmesg_style(multiboot2_info_ptr);
 }

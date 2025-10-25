@@ -12,12 +12,15 @@
 #include <ata.h>
 #include <ps2.h>
 #include <iothread.h>
+#include <zux.h>
 #include <fs_interface.h>
 #include <fat32.h>
 #include <gdt.h>
 #include <syscall.h>
 #include <elf.h>
 #include <sysinfo.h>
+#include <pci.h>
+#include <cirrus.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -66,7 +69,7 @@ extern "C" void enable_sse() {
 void parse_multiboot2(uint64_t addr) {
         struct multiboot2_tag* tag;
         
-        PrintfQEMU("Parsing multiboot2 info at 0x%llx\n", (unsigned long long)addr);
+        qemu_log_printf("Parsing multiboot2 info at 0x%llx\n", (unsigned long long)addr);
         
         // Кандидаты модулей: приоритетно ищем по cmdline=\"bzbx\", иначе берём первый попавшийся
         uint64_t fb_mod_start = 0, fb_mod_size = 0; bool have_fallback = false; bool picked_bzbx = false;
@@ -75,19 +78,19 @@ void parse_multiboot2(uint64_t addr) {
                  tag->type != 0;
                  tag = (struct multiboot2_tag*)((uint8_t*)tag + ((tag->size + 7) & ~7))) {
                 
-                PrintfQEMU("Found tag type: %u, size: %u\n", tag->type, tag->size);
+                qemu_log_printf("Found tag type: %u, size: %u\n", tag->type, tag->size);
                 
                 switch (tag->type) {
                         case 8: { // Framebuffer
                                 struct multiboot2_tag_framebuffer* fb_tag = 
                                         (struct multiboot2_tag_framebuffer*)tag;
                                 
-                                PrintfQEMU("Framebuffer tag found:\n");
-                                PrintfQEMU("  addr: 0x%llx\n", (unsigned long long)fb_tag->framebuffer_addr);
-                                PrintfQEMU("  width: %u\n", fb_tag->framebuffer_width);
-                                PrintfQEMU("  height: %u\n", fb_tag->framebuffer_height);
-                                PrintfQEMU("  pitch: %u\n", fb_tag->framebuffer_pitch);
-                                PrintfQEMU("  bpp: %u\n", fb_tag->framebuffer_bpp);
+                                qemu_log_printf("Framebuffer tag found:\n");
+                                qemu_log_printf("  addr: 0x%llx\n", (unsigned long long)fb_tag->framebuffer_addr);
+                                qemu_log_printf("  width: %u\n", fb_tag->framebuffer_width);
+                                qemu_log_printf("  height: %u\n", fb_tag->framebuffer_height);
+                                qemu_log_printf("  pitch: %u\n", fb_tag->framebuffer_pitch);
+                                qemu_log_printf("  bpp: %u\n", fb_tag->framebuffer_bpp);
                                 // Попробуем предпочесть EDID preferred mode, если GRUB его сообщил через gfxmode.
                                 // GRUB с gfxpayload=keep уже устанавливает режим; здесь просто инициализируем VBE.
                                 vbe_init((uint64_t)fb_tag->framebuffer_addr,
@@ -219,7 +222,7 @@ static int kexecve(const char* path, const char* const* argv){
                         ut->fds[0]=f0; ut->fds[1]=f1; ut->fds[2]=f2;
                 }
         }
-        PrintfQEMU("[kexecve] path=%s entry(raw)=0x%llx at_entry=0x%llx rsp=0x%llx\n", path, (unsigned long long)entry, (unsigned long long)at_entry, (unsigned long long)sp);
+        qemu_log_printf("[kexecve] path=%s entry(raw)=0x%llx at_entry=0x%llx rsp=0x%llx\n", path, (unsigned long long)entry, (unsigned long long)at_entry, (unsigned long long)sp);
         asm volatile(
                 "xor %%rbx, %%rbx; xor %%rdi, %%rdi; xor %%rsi, %%rsi; xor %%rdx, %%rdx;\n"
                 "xor %%r12, %%r12; xor %%r13, %%r13; xor %%r14, %%r14; xor %%r15, %%r15;\n"
@@ -251,16 +254,20 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
                 // disable frame showing until early initialization is complete
                 vbe_set_present_enabled(0);
                 vbec_init_console();
-                klog_printf("kernel_main: kernel started with active interrupts (block 0, 1, 14,15 by default)\n");
-                klog_printf("framebuffer console %ux%u 16 colors initialized\n\n", vbe_get_width() / 9, vbe_get_height() / 16);
+                // Разрешаем прерывания после готовности консоли, чтобы PIT начал тикать к моменту логов
+                asm volatile ("sti");
+                klog_reset_time_base();
+                klog_printf("kernel_main: kernel started with active interrupts\n");
+                klog_printf("framebuffer console %ux%u 16 colors initialized\n\n", vbe_get_cons_width(), vbe_get_cons_height());
         } else {
                 vga_init();
                 vga_clear(7, 0);
+                asm volatile ("sti");
+                klog_reset_time_base();
                 klog_printf("vga: text console 80x25 16 colors initialized\n\n");
         }
         ps2_keyboard_init();
-
-        klog_printf("ent!x kernel v0.10.0d\n");
+        klog_printf("%s kernel version %s\n", ZUX_NAME, ZUX_VERSION_FULL);
         
         thread_init();
         klog_printf("thread_init: Thread manager is ready\n");
@@ -279,7 +286,7 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
                         uint64_t a = (uint64_t)raw;
                         uint64_t aligned = (a + 4095ULL) & ~0xFFFULL;
                         kstack = (void*)aligned;
-                        PrintfQEMU("[tss] kmalloc_aligned fallback: raw=%p aligned=%p\n", raw, kstack);
+                        qemu_log_printf("[tss] kmalloc_aligned fallback: raw=%p aligned=%p\n", raw, kstack);
                 } else {
                         // Dump heap info to help diagnose why allocation failed
                         dump_heap_info();
@@ -291,7 +298,7 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
                 }
         }
         uint64_t kstack_top = (uint64_t)kstack + 16384;
-        PrintfQEMU("[tss] kstack=%p kstack_top=0x%llx\n", kstack, (unsigned long long)kstack_top);
+        qemu_log_printf("[tss] kstack=%p kstack_top=0x%llx\n", kstack, (unsigned long long)kstack_top);
         if (kstack) memset(kstack, 0xCD, 16384);
         thread_t* cur = thread_current();
         if (cur) {
@@ -300,7 +307,14 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
                 PrintQEMU("[tss] WARN: thread_current()==nullptr\n");
         }
         tss_set_rsp0(kstack_top);
-        PrintfQEMU("[tss] rsp0 set to 0x%llx\n", (unsigned long long)kstack_top);
+        // Выделим отдельный IST стек для #DF (достаточно 8 КБ)
+        void* df_stack = kmalloc_aligned(8192, 4096);
+        if (df_stack) {
+                memset(df_stack, 0xCC, 8192);
+                uint64_t df_top = (uint64_t)df_stack + 8192;
+                tss_set_ist(1, df_top);
+        }
+        qemu_log_printf("[tss] rsp0 set to 0x%llx\n", (unsigned long long)kstack_top);
         // Обновим стек для входа SYSCALL (используется syscall_entry.S)
         extern uint64_t syscall_kernel_rsp0;
         syscall_kernel_rsp0 = kstack_top;
@@ -309,25 +323,23 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
         PrintQEMU("[syscall] init x86_64 SYSCALL...\n");
         syscall_x64_init();
         klog_printf("syscalls: ready to fire\n");
+        klog_printf("\n");
         // Прерывания включим после монтирования VFS, чтобы исключить ранние IRQ во время парсинга cpio
         
         // Initialize and print system information in Unix dmesg style
-        sysinfo_init();
+        sysinfo_init_with_multiboot2(multiboot2_info_ptr);
 
-        // Если модуль CPIO лежит за пределами ранней identity‑map (например, 0x60000000+),
-        // промапим его идентично на время монтирования, затем VFS скопирует данные в heap
         if (g_bzbx_mod_size) {
                 uint64_t mb_base = g_bzbx_mod_start & ~0xFFFULL;
                 uint64_t mb_end  = (g_bzbx_mod_start + g_bzbx_mod_size + 0xFFFULL) & ~0xFFFULL;
                 if (mb_end > mb_base) {
                         uint64_t sz = mb_end - mb_base;
                         paging_map_range(mb_base, mb_base, sz, PAGE_PRESENT | PAGE_WRITABLE);
-                        PrintfQEMU("[cpio map] mapped module @0x%llx..0x%llx (%llu KB)\n",
+                        qemu_log_printf("[cpio map] mapped module @0x%llx..0x%llx (%llu KB)\n",
                                    (unsigned long long)mb_base, (unsigned long long)mb_end, (unsigned long long)(sz/1024ULL));
                 }
         }
-
-        // Монтируем VFS из модуля Multiboot2, если он передан; иначе — попытка из FAT32
+        klog_printf("\n");
         if (g_bzbx_mod_size) {
                 klog_printf("mnt_from_cpio: mounting cpio from module, start=0x%llx size=%llu\n",
                                    (unsigned long long)g_bzbx_mod_start,
@@ -341,24 +353,20 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
                         klog_printf("vfs: fatal: interface has null ops\n");
                         for(;;);
                 }
-        fs_set_current(ifs);
+                fs_set_current(ifs);
         }
         else { klog_printf("failed to mount cpio module; kernel unable to start"); for (;;); }
+        // Инициализируем PCI после монтирования VFS, чтобы опубликовать /dev/pci/*
+        // Запускаем в самом конце ранней инициализации, после включения прерываний, консоли и VFS
+        pci_init();
+        clgd54xx_init();
+        clgd54xx_set_mode(800, 600, 32);
         if (vbe_is_initialized()) vbe_set_present_enabled(1);
-        asm volatile ("sti");
-        const char* argv_fallback[] = { "busybox", "sh", "-i", nullptr };
-        //(void)kexecve("/bin/busybox", argv_fallback);
-        klog_printf("kexecve: executing busybox shell\n");
-        
-        // idle kernel process
-        int i;
-        int j;
-        for(;;) {
-                if (i % 256) i = 0;
-                if (j % 16) j = 0;
-                vbec_put_cell(80, 0, '!', j, 0);
-                i++;
-                j++;
-        }
-} 
+
+
+        // const char* argv_fallback[] = { "busybox", "sh", "-i", nullptr };
+        // (void)kexecve("/bin/busybox", argv_fallback);
+
+        for(;;);
+}
 

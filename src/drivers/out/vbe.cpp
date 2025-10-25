@@ -58,7 +58,7 @@ void vbe_init(uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch, ui
                 g_fb_initialized = false;
                 g_frontbuffer = nullptr;
                 // backbuffer может остаться невыделенным; консоль VGA возьмёт управление выводом
-                PrintfQEMU("[vbe] disabled: VGA text mode detected (addr=0x%llx %ux%u pitch=%u bpp=%u)\n",
+                qemu_log_printf("[vbe] disabled: VGA text mode detected (addr=0x%llx %ux%u pitch=%u bpp=%u)\n",
                            (unsigned long long)addr, (unsigned)width, (unsigned)height, (unsigned)pitch, (unsigned)bpp);
                 return;
         }
@@ -77,6 +77,8 @@ bool vbe_console_ready() {
 
 uint32_t vbe_get_width() { return g_fb_width; }
 uint32_t vbe_get_height() { return g_fb_height; }
+uint32_t vbe_get_cons_width() { return g_cons_w; }
+uint32_t vbe_get_cons_height() { return g_cons_h; }
 uint32_t vbe_get_pitch() { return g_fb_pitch; }
 uint32_t vbe_get_bpp() { return g_fb_bpp; }
 uint64_t vbe_get_addr() { return (uint64_t)(uint64_t)g_fb_addr; }
@@ -112,6 +114,8 @@ void vbe_shutdown() {
 }
 
 void vbe_set_present_enabled(int enable) { g_present_enabled = enable ? 1 : 0; }
+
+void vbe_force_unlock(){ g_vbe_in_cs = 0; }
 
 void vbe_swap() {
 	if (!g_fb_initialized || !g_backbuffer || !g_frontbuffer) return;
@@ -254,16 +258,16 @@ void vbe_swap() {
 static inline uint32_t vbec_color(uint8_t idx) { return g_palette[idx & 15]; }
 
 void vbec_init_console() {
-    if (!g_fb_initialized) return;
-    // allocate backbuffer now that heap is initialized
-    if (!g_backbuffer) {
-        size_t bytes = (size_t)g_fb_width * (size_t)g_fb_height * 4;
-        g_backbuffer = (uint32_t*)kmalloc(bytes);
+        if (!g_fb_initialized) return;
+        // allocate backbuffer now that heap is initialized
         if (!g_backbuffer) {
+                size_t bytes = (size_t)g_fb_width * (size_t)g_fb_height * 4;
+                g_backbuffer = (uint32_t*)kmalloc(bytes);
+                if (!g_backbuffer) {
                         // Без backbuffer корректно можем работать только при 32 bpp
                         if (g_fb_bpp == 32) {
                                 g_backbuffer = (uint32_t*)g_frontbuffer;
-        } else {
+                } else {
                                 // отключим VBE‑консоль, чтобы не писать 32-битные пиксели в 16/24-битный буфер
                                 g_fb_initialized = false;
                                 return;
@@ -274,13 +278,13 @@ void vbec_init_console() {
         }
     }
         // 9x16 font grid and palette
-        g_cons_w = g_fb_width / g_cell_w;
+        g_cons_w = g_fb_width / g_cell_w + 1; // Added +1 because of the division: we dont get full width, 87 instead of 88, so we add +1 to avoid losing a column
         g_cons_h = g_fb_height / g_cell_h;
-    g_palette[0]=0xFF000000; g_palette[1]=0xFF0000AA; g_palette[2]=0xFF00AA00; g_palette[3]=0xFF00AAAA;
-    g_palette[4]=0xFFAA0000; g_palette[5]=0xFFAA00AA; g_palette[6]=0xFFAA5500; g_palette[7]=0xFFAAAAAA;
-    g_palette[8]=0xFF555555; g_palette[9]=0xFF5555FF; g_palette[10]=0xFF55FF55; g_palette[11]=0xFF55FFFF;
-    g_palette[12]=0xFFFF5555; g_palette[13]=0xFFFF55FF; g_palette[14]=0xFFFFFF55; g_palette[15]=0xFFFFFFFF;
-    g_cursor_x = g_cursor_y = 0;
+        g_palette[0]=0xFF000000; g_palette[1]=0xFF0000AA; g_palette[2]=0xFF00AA00; g_palette[3]=0xFF00AAAA;
+        g_palette[4]=0xFFAA0000; g_palette[5]=0xFFAA00AA; g_palette[6]=0xFFAA5500; g_palette[7]=0xFFAAAAAA;
+        g_palette[8]=0xFF555555; g_palette[9]=0xFF5555FF; g_palette[10]=0xFF55FF55; g_palette[11]=0xFF55FFFF;
+        g_palette[12]=0xFFFF5555; g_palette[13]=0xFFFF55FF; g_palette[14]=0xFFFFFF55; g_palette[15]=0xFFFFFFFF;
+        g_cursor_x = g_cursor_y = 0;
 	vbe_clear(0x00000000);
 }
 

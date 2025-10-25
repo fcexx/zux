@@ -37,10 +37,15 @@ void vbec_put_cell(uint32_t x, uint32_t y, char c, uint8_t fg, uint8_t bg);
 void vbec_scroll_up(uint8_t bg_idx);
 void vbec_set_cursor(uint32_t x, uint32_t y);
 void vbec_get_cursor(uint32_t* x, uint32_t* y);
+
 uint32_t vbec_get_width();
 uint32_t vbec_get_height();
-
+uint32_t vbe_get_cons_width();
+uint32_t vbe_get_cons_height();
 // Cursor blinking support for VBE console
 void vbe_cursor_tick();
+
+// Emergency: force-unlock VBE console critical section (used from fault handlers)
+void vbe_force_unlock();
 
 #endif // VBE_H

@@ -7,10 +7,11 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-void PrintfQEMU(const char* fmt, ...);
+void qemu_log_printf(const char* fmt, ...);
 const char* k_get_mslog();
 int klog_printf(const char* fmt, ...);
 int klog_vprintf(const char* fmt, va_list ap);
+void klog_reset_time_base(void);
 #ifdef __cplusplus
 }
 #endif
@@ -21,3 +22,5 @@ uint8_t inb(uint16_t port);
 void outw(uint16_t port, uint16_t val);
 uint16_t inw(uint16_t port);
 void PrintQEMU(const char* str);
+void outl(uint16_t port, uint32_t val);
+uint32_t inl(uint16_t port);

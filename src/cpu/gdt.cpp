@@ -134,6 +134,17 @@ void tss_set_rsp0(uint64_t rsp0) {
         syscall_kernel_rsp0 = rsp0;
 }
 
+void tss_set_ist(int idx, uint64_t rsp_top) {
+        // idx 1..7
+        uint64_t* istp = nullptr;
+        switch (idx) {
+                case 1: istp = &tss.ist1; break; case 2: istp = &tss.ist2; break; case 3: istp = &tss.ist3; break;
+                case 4: istp = &tss.ist4; break; case 5: istp = &tss.ist5; break; case 6: istp = &tss.ist6; break;
+                case 7: istp = &tss.ist7; break; default: return;
+        }
+        *istp = rsp_top;
+}
+
 void enter_user_mode(uint64_t user_entry, uint64_t user_stack_top) {
         enter_user_mode_asm(user_entry, user_stack_top, USER_DS, USER_CS);
 } 

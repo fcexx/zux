@@ -200,19 +200,19 @@ static inline void mmap_base_init_if_needed(){
 
 static uint64_t sys_brk(uint64_t newbrk){
     brk_init_if_needed();
-    PrintfQEMU("[brk] in: new=0x%llx cur=0x%llx base=0x%llx\n",
+    qemu_log_printf("[brk] in: new=0x%llx cur=0x%llx base=0x%llx\n",
                (unsigned long long)newbrk,
                (unsigned long long)g_brk_current,
                (unsigned long long)elf_last_brk_base);
     if (newbrk == 0) {
-        PrintfQEMU("[brk] query -> 0x%llx\n", (unsigned long long)g_brk_current);
+        qemu_log_printf("[brk] query -> 0x%llx\n", (unsigned long long)g_brk_current);
         return g_brk_current;
     }
     // Compatibility path: some libcs call brk(delta) early as if it were sbrk
     if (newbrk < elf_last_brk_base) {
         uint64_t delta = newbrk;
         newbrk = g_brk_current + delta;
-        PrintfQEMU("[brk] treating as increment: +0x%llx -> new=0x%llx\n",
+        qemu_log_printf("[brk] treating as increment: +0x%llx -> new=0x%llx\n",
                    (unsigned long long)delta, (unsigned long long)newbrk);
     }
     uint64_t old = g_brk_current;
@@ -227,7 +227,7 @@ static uint64_t sys_brk(uint64_t newbrk){
         cur += 0x1000ULL;
     }
     g_brk_current = newbrk;
-    PrintfQEMU("[brk] out: cur=0x%llx (old=0x%llx)\n",
+    qemu_log_printf("[brk] out: cur=0x%llx (old=0x%llx)\n",
                (unsigned long long)g_brk_current,
                (unsigned long long)old);
     return g_brk_current;
@@ -265,7 +265,7 @@ static uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t
         paging_map_page(v, (uint64_t)page, pflags);
         memset((void*)v, 0, 0x1000);
     }
-    PrintfQEMU("[mmap] in_addr=0x%llx len=%llu prot=0x%llx flags=0x%llx fd=%lld -> ret=0x%llx range[0x%llx..0x%llx)\n",
+    qemu_log_printf("[mmap] in_addr=0x%llx len=%llu prot=0x%llx flags=0x%llx fd=%lld -> ret=0x%llx range[0x%llx..0x%llx)\n",
                (unsigned long long)(addr), (unsigned long long)length,
                (unsigned long long)prot, (unsigned long long)flags, (long long)fd,
                (unsigned long long)addr, (unsigned long long)va, (unsigned long long)end);
@@ -378,7 +378,7 @@ extern "C" uint64_t syscall_entry_c(SyscallFrame* f){
     uint64_t nr = f->nr;
     uint64_t a1 = f->a1, a2 = f->a2, a3 = f->a3, a4 = f->a4, a5 = f->a5, a6 = f->a6;
 
-    PrintfQEMU("syscall_entry_c: nr=%llu a1=%llu a2=%llu a3=%llu a4=%llu a5=%llu a6=%llu\n", nr, a1, a2, a3, a4, a5, a6);
+    qemu_log_printf("syscall_entry_c: nr=%llu a1=%llu a2=%llu a3=%llu a4=%llu a5=%llu a6=%llu\n", nr, a1, a2, a3, a4, a5, a6);
     switch (nr) {
     case LNX_read: {
         int fd = (int)a1; char* buf = (char*)a2; size_t cnt = (size_t)a3;
@@ -398,7 +398,7 @@ extern "C" uint64_t syscall_entry_c(SyscallFrame* f){
                 // Print as a bounded C-string: copy to temp to ensure NUL-termination
                 char tmp[161]; size_t i=0; for (; i<show; ++i){ tmp[i] = buf[i]; }
                 tmp[i] = '\0';
-                PrintfQEMU("[stderr] %s\n", tmp);
+                qemu_log_printf("[stderr] %s\n", tmp);
             }
             return (uint64_t)console_write(buf, cnt);
         }
@@ -418,7 +418,7 @@ extern "C" uint64_t syscall_entry_c(SyscallFrame* f){
                     size_t show = len; if (show > 160) show = 160;
                     char tmp[161]; size_t j=0; for (; j<show; ++j){ tmp[j] = base[j]; }
                     tmp[j] = '\0';
-                    PrintfQEMU("[stderr] %s\n", tmp);
+                    qemu_log_printf("[stderr] %s\n", tmp);
                 }
                 r = console_write(base, len);
             }
@@ -510,7 +510,7 @@ extern "C" uint64_t syscall_entry_c(SyscallFrame* f){
     case LNX_uname: {
         struct uts { char sysname[65]; char nodename[65]; char release[65]; char version[65]; char machine[65]; char domain[65]; };
         uts* u = (uts*)a1; if (!u) return (uint64_t)-14; memset(u,0,sizeof(*u));
-        strncpy(u->sysname, "entix", 64); strncpy(u->release, "0.1", 64); strncpy(u->version, "entix-early", 64); strncpy(u->machine, "x86_64", 64); return 0;
+        strncpy(u->sysname, "zux", 64); strncpy(u->release, "0.1", 64); strncpy(u->version, "zux-early", 64); strncpy(u->machine, "x86_64", 64); return 0;
     }
     case LNX_getcwd: {
         char* buf = (char*)a1; size_t sz = (size_t)a2; if (!buf || sz==0) return (uint64_t)-22; const char* s = "/"; size_t L = strlen(s)+1; if (L>sz) return (uint64_t)-34; memcpy(buf,s,L); return (uint64_t)L;
@@ -527,12 +527,12 @@ extern "C" uint64_t syscall_entry_c(SyscallFrame* f){
     case LNX_arch_prctl: {
         int code = (int)a1; uint64_t val = a2;
         const uint32_t IA32_FS_BASE = 0xC0000100;
-        PrintfQEMU("[arch_prctl] code=0x%x val=0x%llx\n", code, (unsigned long long)val);
+        qemu_log_printf("[arch_prctl] code=0x%x val=0x%llx\n", code, (unsigned long long)val);
         if (code == ARCH_SET_FS_) {
             uint32_t lo = (uint32_t)(val & 0xFFFFFFFFu); uint32_t hi = (uint32_t)(val >> 32);
             asm volatile("wrmsr" :: "c"(IA32_FS_BASE), "a"(lo), "d"(hi));
             thread_t* t = cur_user(); if (t) t->user_fs_base = val;
-            PrintfQEMU("[arch_prctl] FS set to 0x%llx\n", (unsigned long long)val);
+            qemu_log_printf("[arch_prctl] FS set to 0x%llx\n", (unsigned long long)val);
             return 0;
         } else if (code == ARCH_GET_FS_) {
             uint32_t lo, hi; asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(IA32_FS_BASE));
@@ -565,7 +565,7 @@ extern "C" uint64_t syscall_entry_c(SyscallFrame* f){
         for(;;) { thread_yield(); }
     }
     default:
-        PrintfQEMU("[syscall] unimplemented nr=%llu a1=0x%llx a2=0x%llx a3=0x%llx\n", (unsigned long long)nr, (unsigned long long)a1, (unsigned long long)a2, (unsigned long long)a3);
+        qemu_log_printf("[syscall] unimplemented nr=%llu a1=0x%llx a2=0x%llx a3=0x%llx\n", (unsigned long long)nr, (unsigned long long)a1, (unsigned long long)a2, (unsigned long long)a3);
         return (uint64_t)-38; // -ENOSYS
     }
 }

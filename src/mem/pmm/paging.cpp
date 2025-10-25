@@ -93,13 +93,9 @@ void paging_init() {
         clear_page_table(&page_table_l4);
         pt_pool_offset = 0;
         
-        // Identity map first 64MB (kernel-only)
-        paging_map_range(0x00000000ULL, 0x00000000ULL, 0x04000000ULL, PAGE_PRESENT | PAGE_WRITABLE);
-
-        // TEMP: map first 4MB as user-accessible to avoid some PF during debugging
-        // Reduced from 64MB to 4MB to limit exposure of kernel identity mappings to user mode.
-        // NOTE: this is still a debugging aid — remove before production use.
-        paging_map_range(0x00000000ULL, 0x00000000ULL, 0x00400000ULL, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+        // Identity map first 64MB as user-accessible (debug aid to avoid PF from userland touching low memory)
+        // NOTE: keep until user-mode has no dependency on low identity addresses
+        paging_map_range(0x00000000ULL, 0x00000000ULL, 0x04000000ULL, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
         
         // Map linear framebuffer only if VBE console is initialized
         if (vbe_is_initialized()) {
@@ -115,7 +111,7 @@ void paging_init() {
                 uint64_t fb_base = fb_addr & ~0xFFFFFULL; // выровняем вниз по 1MB
                 uint64_t map_size = (fb_size + 0xFFFFFULL) & ~0xFFFFFULL;
                 paging_map_range(fb_base, fb_base, map_size, PAGE_PRESENT | PAGE_WRITABLE);
-                PrintfQEMU("[paging] mapped framebuffer at 0x%llx size=0x%llx\n", (unsigned long long)fb_base, (unsigned long long)map_size);
+                qemu_log_printf("[paging] mapped framebuffer at 0x%llx size=0x%llx\n", (unsigned long long)fb_base, (unsigned long long)map_size);
                 }
         }
         
@@ -135,7 +131,7 @@ void paging_map_page(uint64_t virtual_addr, uint64_t physical_addr, uint64_t fla
                 asm volatile("invlpg (%0)" : : "r" (virtual_addr) : "memory");
         } else {
                 PrintQEMU("Failed to map page: ");
-                PrintfQEMU("0x%x -> 0x%x\n", virtual_addr, physical_addr);
+                qemu_log_printf("0x%x -> 0x%x\n", virtual_addr, physical_addr);
         }
 }
 

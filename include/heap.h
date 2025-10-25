@@ -71,7 +71,7 @@ public:
                 size_t leading = __builtin_clzll(x);
                 size_t bucket = (bits - 1) - leading;
                 // debug bullshit
-                // PrintfQEMU("[heap] get_bucket_index: size=%zu -> bucket=%zu\n", size, bucket);
+                // qemu_log_printf("[heap] get_bucket_index: size=%zu -> bucket=%zu\n", size, bucket);
                 return bucket;
         }
         

@@ -1,4 +1,4 @@
-; boot.asm - Загрузчик Multiboot2 для Entix OS
+; boot.asm - Загрузчик Multiboot2 для Zux OS
 ; Компилировать: nasm -f elf64 boot.asm -o boot.o
 
 section .multiboot2

@@ -130,7 +130,7 @@ int fat32_mount(uint8_t drive) {
         // Проверяем сигнатуру MBR
         if (sector[0x1FE] != 0x55 || sector[0x1FF] != 0xAA) {
                 kfree(sector); 
-                PrintfQEMU("[FAT32][ERR] fat32_mount: invalid mbr signature (0x%02X%02X)\n", sector[0x1FE], sector[0x1FF]); 
+                qemu_log_printf("[FAT32][ERR] fat32_mount: invalid mbr signature (0x%02X%02X)\n", sector[0x1FE], sector[0x1FF]); 
                 return -3;
         }
         
@@ -141,20 +141,20 @@ int fat32_mount(uint8_t drive) {
                 uint8_t status = sector[offset];
                 uint8_t type = sector[offset + 4];
                 
-                PrintfQEMU("[FAT32][INFO] fat32_mount: partition %d: status=0x%02X, type=0x%02X\n", i, status, type);
+                qemu_log_printf("[FAT32][INFO] fat32_mount: partition %d: status=0x%02X, type=0x%02X\n", i, status, type);
                 
                 // Проверяем что раздел имеет тип FAT32 (не обязательно активный)
                 if (type == 0x0B || type == 0x0C) {
                         // Читаем LBA первого сектора раздела
                         partition_lba = *(uint32_t*)(&sector[offset + 8]);
-                        PrintfQEMU("[FAT32][INFO] fat32_mount: found fat32 partition at LBA %u\n", partition_lba);
+                        qemu_log_printf("[FAT32][INFO] fat32_mount: found fat32 partition at LBA %u\n", partition_lba);
                         break;
                 }
         }
         
         if (partition_lba == 0) {
                 kfree(sector); 
-                PrintfQEMU("[FAT32][ERR] fat32_mount: no fat32 partition found\n"); 
+                qemu_log_printf("[FAT32][ERR] fat32_mount: no fat32 partition found\n"); 
                 return -4;
         }
         
@@ -164,24 +164,24 @@ int fat32_mount(uint8_t drive) {
         // Проверяем сигнатуру загрузочного сектора
         if (sector[0x1FE] != 0x55 || sector[0x1FF] != 0xAA) {
                 kfree(sector); 
-                PrintfQEMU("[FAT32][ERR] fat32_mount: invalid boot sector signature\n"); 
+                qemu_log_printf("[FAT32][ERR] fat32_mount: invalid boot sector signature\n"); 
                 return -6;
         }
         
         memcpy(&fat32_bpb, sector, sizeof(fat32_bpb)); /* dst=bpb, src=sector */
 
-        if (fat32_bpb.table_size_32==0) { kfree(sector); PrintfQEMU("[FAT32][ERR] fat32_mount: table_size_32 is 0\n"); return -7; }
+        if (fat32_bpb.table_size_32==0) { kfree(sector); qemu_log_printf("[FAT32][ERR] fat32_mount: table_size_32 is 0\n"); return -7; }
         sectors_per_fat         = fat32_bpb.table_size_32;
         fat_start                   = fat32_bpb.reserved_sector_count;
         cluster_begin_lba   = fat_start + fat32_bpb.table_count * sectors_per_fat;
         root_dir_first_cluster = fat32_bpb.root_cluster ? fat32_bpb.root_cluster : 2;
         current_dir_cluster = root_dir_first_cluster;
 
-        PrintfQEMU("[FAT32][INFO] fat32: sectors_per_fat: %u\n", sectors_per_fat);
-        PrintfQEMU("[FAT32][INFO] fat32: fat_start: %u\n", fat_start);
-        PrintfQEMU("[FAT32][INFO] fat32: cluster_begin_lba: %u\n", cluster_begin_lba);
-        PrintfQEMU("[FAT32][INFO] fat32: root_dir_first_cluster: %u\n", root_dir_first_cluster);
-        PrintfQEMU("[FAT32][INFO] fat32: current_dir_cluster: %u\n", current_dir_cluster);
+        qemu_log_printf("[FAT32][INFO] fat32: sectors_per_fat: %u\n", sectors_per_fat);
+        qemu_log_printf("[FAT32][INFO] fat32: fat_start: %u\n", fat_start);
+        qemu_log_printf("[FAT32][INFO] fat32: cluster_begin_lba: %u\n", cluster_begin_lba);
+        qemu_log_printf("[FAT32][INFO] fat32: root_dir_first_cluster: %u\n", root_dir_first_cluster);
+        qemu_log_printf("[FAT32][INFO] fat32: current_dir_cluster: %u\n", current_dir_cluster);
 
         /* количество доступных кластеров на разделе */
         uint32_t data_sectors = fat32_bpb.total_sectors_32 - cluster_begin_lba;
@@ -217,10 +217,10 @@ uint32_t fat32_get_next_cluster(uint8_t drive, uint32_t cluster) {
  * ----------------------------------------------------------------*/
 int fat32_list_dir(uint8_t drive, uint32_t cluster,
                                    fat32_entry_t* out, int max_entries) {
-        PrintfQEMU("[FAT32] fat32_list_dir: cluster = %u, max_entries = %d\n", cluster, max_entries);
+        qemu_log_printf("[FAT32] fat32_list_dir: cluster = %u, max_entries = %d\n", cluster, max_entries);
         uint8_t *sector = (uint8_t*)kmalloc(512);
         if (!sector) {
-                PrintfQEMU("[FAT32] fat32_list_dir: kmalloc failed\n");
+                qemu_log_printf("[FAT32] fat32_list_dir: kmalloc failed\n");
                 return -1;
         }
         int count = 0;
@@ -230,22 +230,22 @@ int fat32_list_dir(uint8_t drive, uint32_t cluster,
 
         uint32_t cl = cluster;
         while (cl < 0x0FFFFFF8) {
-                PrintfQEMU("[FAT32] fat32_list_dir: processing cluster %u\n", cl);
+                qemu_log_printf("[FAT32] fat32_list_dir: processing cluster %u\n", cl);
                 for (uint8_t s=0; s<fat32_bpb.sectors_per_cluster; s++) {
                         uint32_t lba = fat32_cluster_to_lba(cl)+s;
-                        PrintfQEMU("[FAT32] fat32_list_dir: reading sector %u\n", lba);
+                        qemu_log_printf("[FAT32] fat32_list_dir: reading sector %u\n", lba);
                         if (ata_read_sector(drive, lba, sector)!=0) { 
-                                PrintfQEMU("[FAT32] fat32_list_dir: ata_read_sector failed\n");
+                                qemu_log_printf("[FAT32] fat32_list_dir: ata_read_sector failed\n");
                                 kfree(sector); 
                                 return -2; 
                         }
 
                         for (int off=0; off<512; off+=32) {
                                 fat32_dir_entry_t *ent = (fat32_dir_entry_t*)&sector[off];
-                                PrintfQEMU("[FAT32] fat32_list_dir: checking entry at offset %d, name[0]=0x%02x, attr=0x%02x\n", off, ent->name[0], ent->attr);
+                                qemu_log_printf("[FAT32] fat32_list_dir: checking entry at offset %d, name[0]=0x%02x, attr=0x%02x\n", off, ent->name[0], ent->attr);
                                 if (ent->name[0]==0x00) { 
                                         // Это пустая запись - конец директории
-                                        PrintfQEMU("[FAT32] fat32_list_dir: end of directory, count = %d\n", count);
+                                        qemu_log_printf("[FAT32] fat32_list_dir: end of directory, count = %d\n", count);
                                         kfree(sector); 
                                         return count; 
                                 }
@@ -269,7 +269,7 @@ int fat32_list_dir(uint8_t drive, uint32_t cluster,
                                 }
                                 if (ent->name[0]==0xE5) { lfn_present=0; continue; } // удалённая
                                 if (count>=max_entries) { 
-                                        PrintfQEMU("[FAT32] fat32_list_dir: max entries reached\n");
+                                        qemu_log_printf("[FAT32] fat32_list_dir: max entries reached\n");
                                         kfree(sector); 
                                         return count; 
                                 }
@@ -294,7 +294,7 @@ int fat32_list_dir(uint8_t drive, uint32_t cluster,
                                 dst->first_cluster = ((uint32_t)ent->first_cluster_high<<16) | ent->first_cluster_low;
                                 dst->size = ent->file_size;
 
-                                PrintfQEMU("[FAT32] fat32_list_dir: found entry %d: %s (attr=0x%02x, cluster=%u)\n", 
+                                qemu_log_printf("[FAT32] fat32_list_dir: found entry %d: %s (attr=0x%02x, cluster=%u)\n", 
                                                   count, dst->name, dst->attr, dst->first_cluster);
                                 count++;
                                 lfn_present = 0; // сброс для следующего файла
@@ -302,7 +302,7 @@ int fat32_list_dir(uint8_t drive, uint32_t cluster,
                 }
                 cl = fat32_get_next_cluster(drive, cl);
         }
-        PrintfQEMU("[FAT32] fat32_list_dir: finished, count = %d\n", count);
+        qemu_log_printf("[FAT32] fat32_list_dir: finished, count = %d\n", count);
         kfree(sector);
         return count;
 }
@@ -489,9 +489,9 @@ int fat32_read_file_data(uint8_t d,const char*p,uint8_t*b,uint32_t s,uint32_t o)
  *                  Простейшая реализация разрешения пути
  * -----------------------------------------------------------*/
 int fat32_resolve_path(uint8_t drive, const char* path, uint32_t* target_cluster) {
-        PrintfQEMU("[FAT32] fat32_resolve_path: %s\n", path ? path : "null");
+        qemu_log_printf("[FAT32] fat32_resolve_path: %s\n", path ? path : "null");
         if (!path || !target_cluster) {
-                PrintfQEMU("[FAT32] fat32_resolve_path: invalid parameters\n");
+                qemu_log_printf("[FAT32] fat32_resolve_path: invalid parameters\n");
                 return -1;
         }
 
@@ -500,7 +500,7 @@ int fat32_resolve_path(uint8_t drive, const char* path, uint32_t* target_cluster
                 /* если после префикса ничего нет – это корень */
                 if (path[3] == '\0') {
                         *target_cluster = root_dir_first_cluster;
-                        PrintfQEMU("[FAT32] fat32_resolve_path: root dir (prefix), cluster = %u\n", *target_cluster);
+                        qemu_log_printf("[FAT32] fat32_resolve_path: root dir (prefix), cluster = %u\n", *target_cluster);
                         return 0;
                 }
                 /* пропускаем "X:\" */
@@ -510,28 +510,28 @@ int fat32_resolve_path(uint8_t drive, const char* path, uint32_t* target_cluster
         /* Абсолютный корень */
         if ((path[0]=='/' || path[0]=='\\') && path[1]=='\0') {
                 *target_cluster = root_dir_first_cluster;
-                PrintfQEMU("[FAT32] fat32_resolve_path: root dir, cluster = %u\n", *target_cluster);
+                qemu_log_printf("[FAT32] fat32_resolve_path: root dir, cluster = %u\n", *target_cluster);
                 return 0;
         }
 
         /* Текущий каталог */
         if (path[0]=='\0' || (path[0]=='.' && path[1]=='\0')) {
                 *target_cluster = current_dir_cluster;
-                PrintfQEMU("[FAT32] fat32_resolve_path: current dir, cluster = %u\n", *target_cluster);
+                qemu_log_printf("[FAT32] fat32_resolve_path: current dir, cluster = %u\n", *target_cluster);
                 return 0;
         }
 
         /* Родитель */
         if (path[0]=='.' && path[1]=='.' && path[2]=='\0') {
-                PrintfQEMU("[FAT32] fat32_resolve_path: parent dir\n");
+                qemu_log_printf("[FAT32] fat32_resolve_path: parent dir\n");
                 fat32_entry_t *list = (fat32_entry_t*)kmalloc(sizeof(fat32_entry_t) * 2);
                 if (!list) {
-                        PrintfQEMU("[FAT32] fat32_resolve_path: kmalloc failed for parent dir\n");
+                        qemu_log_printf("[FAT32] fat32_resolve_path: kmalloc failed for parent dir\n");
                         return -1;
                 }
                 int n = fat32_list_dir(drive, current_dir_cluster, list, 2);
                 if (n<2) {
-                        PrintfQEMU("[FAT32] fat32_resolve_path: parent dir failed\n");
+                        qemu_log_printf("[FAT32] fat32_resolve_path: parent dir failed\n");
                         kfree(list);
                         return -1;
                 }
@@ -539,7 +539,7 @@ int fat32_resolve_path(uint8_t drive, const char* path, uint32_t* target_cluster
                 /* если ".." указывает на текущий каталог – считаем, что это корень */
                 if (*target_cluster == current_dir_cluster || *target_cluster == 0)
                         *target_cluster = root_dir_first_cluster;
-                PrintfQEMU("[FAT32] fat32_resolve_path: parent dir, cluster = %u\n", *target_cluster);
+                qemu_log_printf("[FAT32] fat32_resolve_path: parent dir, cluster = %u\n", *target_cluster);
                 kfree(list);
                 return 0;
         }
@@ -552,12 +552,12 @@ int fat32_resolve_path(uint8_t drive, const char* path, uint32_t* target_cluster
                 /* Абсолютный путь - начинаем с корня */
                 start_cluster = root_dir_first_cluster;
                 search_path = path + 1; /* Пропускаем начальный / */
-                PrintfQEMU("[FAT32] fat32_resolve_path: absolute path, starting from root\n");
+                qemu_log_printf("[FAT32] fat32_resolve_path: absolute path, starting from root\n");
         } else {
                 /* Относительный путь - начинаем с текущей директории */
                 start_cluster = current_dir_cluster;
                 search_path = path;
-                PrintfQEMU("[FAT32] fat32_resolve_path: relative path, starting from current dir\n");
+                qemu_log_printf("[FAT32] fat32_resolve_path: relative path, starting from current dir\n");
         }
 
         /* Обрабатываем путь по частям */
@@ -568,33 +568,33 @@ int fat32_resolve_path(uint8_t drive, const char* path, uint32_t* target_cluster
         // Выделяем память для всех итераций
         fat32_entry_t *list = (fat32_entry_t*)kmalloc(sizeof(fat32_entry_t) * 64);
         if (!list) {
-                PrintfQEMU("[FAT32] fat32_resolve_path: kmalloc failed\n");
+                qemu_log_printf("[FAT32] fat32_resolve_path: kmalloc failed\n");
                 return -1;
         }
         
         char* token = strtok(path_copy, "/\\");
         while (token) {
-                PrintfQEMU("[FAT32] fat32_resolve_path: searching for component '%s' in cluster %u\n", token, start_cluster);
+                qemu_log_printf("[FAT32] fat32_resolve_path: searching for component '%s' in cluster %u\n", token, start_cluster);
                 int n = fat32_list_dir(drive, start_cluster, list, 64);
                 if (n<0) { 
-                        PrintfQEMU("[FAT32] fat32_resolve_path: fat32_list_dir failed\n");
+                        qemu_log_printf("[FAT32] fat32_resolve_path: fat32_list_dir failed\n");
                         kfree(list); 
                         return -1; 
                 }
-                PrintfQEMU("[FAT32] fat32_resolve_path: found %d entries\n", n);
+                qemu_log_printf("[FAT32] fat32_resolve_path: found %d entries\n", n);
                 
                 bool found = false;
                 for (int i=0;i<n;i++) {
                         if (strcasecmp_ascii(list[i].name, token)==0) {
                                 start_cluster = list[i].first_cluster;
-                                PrintfQEMU("[FAT32] fat32_resolve_path: found %s, cluster = %u\n", token, start_cluster);
+                                qemu_log_printf("[FAT32] fat32_resolve_path: found %s, cluster = %u\n", token, start_cluster);
                                 found = true;
                                 break;
                         }
                 }
                 
                 if (!found) {
-                        PrintfQEMU("[FAT32] fat32_resolve_path: component '%s' not found\n", token);
+                        qemu_log_printf("[FAT32] fat32_resolve_path: component '%s' not found\n", token);
                         kfree(list);
                         return -1;
                 }
@@ -604,7 +604,7 @@ int fat32_resolve_path(uint8_t drive, const char* path, uint32_t* target_cluster
         
         kfree(list);
         *target_cluster = start_cluster;
-        PrintfQEMU("[FAT32] fat32_resolve_path: final cluster = %u\n", *target_cluster);
+        qemu_log_printf("[FAT32] fat32_resolve_path: final cluster = %u\n", *target_cluster);
         return 0;
 }
 
@@ -851,7 +851,7 @@ void fat32_create_fs(uint8_t drive) {
                         const char bootmsg[] = "This is not a bootable disk\r\n";
                         uint8_t* sector = (uint8_t*)kmalloc(512);
                         if (!sector) {
-                                PrintfQEMU("[FAT32][ERR] fat32_createfs: error allocating memory\n");
+                                qemu_log_printf("[FAT32][ERR] fat32_createfs: error allocating memory\n");
                                 return;
                         }
                         memset(sector, 0, 512);
@@ -891,7 +891,7 @@ void fat32_create_fs(uint8_t drive) {
                         sector[510] = 0x55; sector[511] = 0xAA;
                         // Write Boot Sector
                         if (ata_write_sector(drive, 0, sector) != 0) {
-                                PrintfQEMU("[FAT32][ERR] fat32_createfs: error writing boot sector\n");
+                                qemu_log_printf("[FAT32][ERR] fat32_createfs: error writing boot sector\n");
                                 return;
                         }
                         // FSInfo
@@ -902,7 +902,7 @@ void fat32_create_fs(uint8_t drive) {
                         *(uint32_t*)&sector[492] = 0xFFFFFFFF;
                         sector[510] = 0x55; sector[511] = 0xAA;
                         if (ata_write_sector(drive, 1, sector) != 0) {
-                                PrintfQEMU("[FAT32][ERR] fat32_createfs: error writing fsinfo\n");
+                                qemu_log_printf("[FAT32][ERR] fat32_createfs: error writing fsinfo\n");
                                 return;
                         }
                         // Clear FAT and root cluster
@@ -913,7 +913,7 @@ void fat32_create_fs(uint8_t drive) {
                         for (int i = 0; i < 123 * 2; i++) {
                                 ata_write_sector(drive, 32 + 32 + i, sector); // FAT
                         }
-                        PrintfQEMU("[FAT32][INFO] fat32_createfs: fat32 created\n");
+                        qemu_log_printf("[FAT32][INFO] fat32_createfs: fat32 created\n");
 }
 
 // --- GLUE-КОД ДЛЯ FS_INTERFACE ---
@@ -935,30 +935,30 @@ struct fat32_fs_file {
 };
 
 static fs_dir_t* fat32_fs_opendir(const char* path) {
-        PrintfQEMU("[FAT32] fat32_fs_opendir: %s\n", path ? path : "null");
+        qemu_log_printf("[FAT32] fat32_fs_opendir: %s\n", path ? path : "null");
         
         if (!path) {
-                PrintfQEMU("[FAT32] fat32_fs_opendir: null path\n");
+                qemu_log_printf("[FAT32] fat32_fs_opendir: null path\n");
                 return NULL;
         }
         
         uint32_t cluster = 0;
         if (fat32_resolve_path(0, path, &cluster) != 0) {
-                PrintfQEMU("[FAT32] fat32_fs_opendir: resolve_path failed\n");
+                qemu_log_printf("[FAT32] fat32_fs_opendir: resolve_path failed\n");
                 return NULL;
         }
-        PrintfQEMU("[FAT32] fat32_fs_opendir: cluster = %u\n", cluster);
+        qemu_log_printf("[FAT32] fat32_fs_opendir: cluster = %u\n", cluster);
         
         struct fat32_fs_dir* fdir = (struct fat32_fs_dir*)kmalloc(sizeof(struct fat32_fs_dir));
         if (!fdir) {
-                PrintfQEMU("[FAT32] fat32_fs_opendir: kmalloc failed for fdir\n");
+                qemu_log_printf("[FAT32] fat32_fs_opendir: kmalloc failed for fdir\n");
                 return NULL;
         }
         
         // Выделяем память для entries
         fdir->entries = (fat32_entry_t*)kmalloc(sizeof(fat32_entry_t) * 64);
         if (!fdir->entries) {
-                PrintfQEMU("[FAT32] fat32_fs_opendir: kmalloc failed for entries\n");
+                qemu_log_printf("[FAT32] fat32_fs_opendir: kmalloc failed for entries\n");
                 kfree(fdir);
                 return NULL;
         }
@@ -970,18 +970,18 @@ static fs_dir_t* fat32_fs_opendir(const char* path) {
         // Читаем содержимое директории
         int n = fat32_list_dir(0, cluster, fdir->entries, 64);
         if (n < 0) {
-                PrintfQEMU("[FAT32] fat32_fs_opendir: fat32_list_dir failed\n");
+                qemu_log_printf("[FAT32] fat32_fs_opendir: fat32_list_dir failed\n");
                 kfree(fdir->entries);
                 kfree(fdir);
                 return NULL;
         }
         
         fdir->entry_count = n;
-        PrintfQEMU("[FAT32] fat32_fs_opendir: entry_count = %d\n", fdir->entry_count);
+        qemu_log_printf("[FAT32] fat32_fs_opendir: entry_count = %d\n", fdir->entry_count);
         
         fs_dir_t* dir = (fs_dir_t*)kmalloc(sizeof(fs_dir_t));
         if (!dir) {
-                PrintfQEMU("[FAT32] fat32_fs_opendir: kmalloc failed for dir\n");
+                qemu_log_printf("[FAT32] fat32_fs_opendir: kmalloc failed for dir\n");
                 kfree(fdir->entries);
                 kfree(fdir);
                 return NULL;
@@ -991,23 +991,23 @@ static fs_dir_t* fat32_fs_opendir(const char* path) {
         strncpy(dir->path, path, sizeof(dir->path)-1);
         dir->path[sizeof(dir->path)-1] = '\0';
         
-        PrintfQEMU("[FAT32] fat32_fs_opendir: success\n");
+        qemu_log_printf("[FAT32] fat32_fs_opendir: success\n");
         return dir;
 }
 
 static int fat32_fs_readdir(fs_dir_t* dir, fs_dirent_t* out) {
-        PrintfQEMU("[FAT32] fat32_fs_readdir: start\n");
+        qemu_log_printf("[FAT32] fat32_fs_readdir: start\n");
         if (!dir || !dir->private_data || !out) {
-                PrintfQEMU("[FAT32] fat32_fs_readdir: invalid parameters\n");
+                qemu_log_printf("[FAT32] fat32_fs_readdir: invalid parameters\n");
                 return -1;
         }
         struct fat32_fs_dir* fdir = (struct fat32_fs_dir*)dir->private_data;
         if (fdir->entry_index >= fdir->entry_count) {
-                PrintfQEMU("[FAT32] fat32_fs_readdir: no more entries\n");
+                qemu_log_printf("[FAT32] fat32_fs_readdir: no more entries\n");
                 return -1;
         }
         fat32_entry_t* ent = &fdir->entries[fdir->entry_index];
-        PrintfQEMU("[FAT32] fat32_fs_readdir: entry %d/%d: %s\n", fdir->entry_index + 1, fdir->entry_count, ent->name);
+        qemu_log_printf("[FAT32] fat32_fs_readdir: entry %d/%d: %s\n", fdir->entry_index + 1, fdir->entry_count, ent->name);
         strncpy(out->name, ent->name, sizeof(out->name)-1);
         out->name[sizeof(out->name)-1] = 0;
         out->attributes = (ent->attr & 0x10) ? FS_ATTR_DIRECTORY : 0;
@@ -1015,27 +1015,27 @@ static int fat32_fs_readdir(fs_dir_t* dir, fs_dirent_t* out) {
         out->create_time = 0;
         out->modify_time = 0;
         fdir->entry_index++; // Увеличиваем индекс после использования
-        PrintfQEMU("[FAT32] fat32_fs_readdir: success\n");
+        qemu_log_printf("[FAT32] fat32_fs_readdir: success\n");
         return 0;
 }
 
 static int fat32_fs_closedir(fs_dir_t* dir) {
-        PrintfQEMU("[FAT32] fat32_fs_closedir: start\n");
+        qemu_log_printf("[FAT32] fat32_fs_closedir: start\n");
         if (!dir) {
-                PrintfQEMU("[FAT32] fat32_fs_closedir: null dir\n");
+                qemu_log_printf("[FAT32] fat32_fs_closedir: null dir\n");
                 return -1;
         }
         if (dir->private_data) {
-                PrintfQEMU("[FAT32] fat32_fs_closedir: freeing private_data\n");
+                qemu_log_printf("[FAT32] fat32_fs_closedir: freeing private_data\n");
                 struct fat32_fs_dir* fdir = (struct fat32_fs_dir*)dir->private_data;
                 if (fdir->entries) {
                         kfree(fdir->entries);
                 }
                 kfree(dir->private_data);
         }
-        PrintfQEMU("[FAT32] fat32_fs_closedir: freeing dir\n");
+        qemu_log_printf("[FAT32] fat32_fs_closedir: freeing dir\n");
         kfree(dir);
-        PrintfQEMU("[FAT32] fat32_fs_closedir: success\n");
+        qemu_log_printf("[FAT32] fat32_fs_closedir: success\n");
         return 0;
 }
 
@@ -1088,26 +1088,26 @@ static int fat32_fs_stat(const char* path, fs_stat_t* stat) {
 }
 
 static fs_file_t* fat32_fs_open(const char* path, int mode) {
-        PrintfQEMU("[FAT32] fat32_fs_open: %s\n", path ? path : "null");
+        qemu_log_printf("[FAT32] fat32_fs_open: %s\n", path ? path : "null");
         uint32_t cluster = 0;
         if (fat32_resolve_path(0, path, &cluster) != 0) {
-                PrintfQEMU("[FAT32] fat32_fs_open: resolve_path failed\n");
+                qemu_log_printf("[FAT32] fat32_fs_open: resolve_path failed\n");
                 return NULL;
         }
-        PrintfQEMU("[FAT32] fat32_fs_open: resolved cluster = %u\n", cluster);
+        qemu_log_printf("[FAT32] fat32_fs_open: resolved cluster = %u\n", cluster);
         
         // Получаем информацию о файле через fat32_fs_stat
         fs_stat_t stat;
         if (fat32_fs_stat(path, &stat) != 0) {
-                PrintfQEMU("[FAT32] fat32_fs_open: fat32_fs_stat failed\n");
+                qemu_log_printf("[FAT32] fat32_fs_open: fat32_fs_stat failed\n");
                 return NULL;
         }
         
-        PrintfQEMU("[FAT32] fat32_fs_open: file size = %u\n", (uint32_t)stat.size);
+        qemu_log_printf("[FAT32] fat32_fs_open: file size = %u\n", (uint32_t)stat.size);
         
         // Проверяем что размер файла не слишком большой
         if (stat.size > 0x1000000) { // 16MB максимум
-                PrintfQEMU("[FAT32][ERROR] fat32_fs_open: file size too large: %u\n", (uint32_t)stat.size);
+                qemu_log_printf("[FAT32][ERROR] fat32_fs_open: file size too large: %u\n", (uint32_t)stat.size);
                 return NULL;
         }
         
@@ -1127,23 +1127,23 @@ static fs_file_t* fat32_fs_open(const char* path, int mode) {
         file->position = 0;
         file->mode = mode;
         
-        PrintfQEMU("[FAT32] fat32_fs_open: success\n");
+        qemu_log_printf("[FAT32] fat32_fs_open: success\n");
         return file;
 }
 
 static int fat32_fs_read(fs_file_t* file, void* buffer, size_t size) {
-        PrintfQEMU("[FAT32] fat32_fs_read: start, size=%zu\n", size);
+        qemu_log_printf("[FAT32] fat32_fs_read: start, size=%zu\n", size);
         if (!file || !file->private_data || !buffer) {
-                PrintfQEMU("[FAT32] fat32_fs_read: invalid parameters\n");
+                qemu_log_printf("[FAT32] fat32_fs_read: invalid parameters\n");
                 return -1;
         }
         struct fat32_fs_file* ffile = (struct fat32_fs_file*)file->private_data;
 
-        PrintfQEMU("[FAT32] fat32_fs_read: position=%u, size=%u\n", ffile->position, ffile->size);
+        qemu_log_printf("[FAT32] fat32_fs_read: position=%u, size=%u\n", ffile->position, ffile->size);
 
         // EOF
         if (ffile->position >= ffile->size) {
-                PrintfQEMU("[FAT32] fat32_fs_read: EOF reached\n");
+                qemu_log_printf("[FAT32] fat32_fs_read: EOF reached\n");
                 return 0;
         }
 
@@ -1151,7 +1151,7 @@ static int fat32_fs_read(fs_file_t* file, void* buffer, size_t size) {
         size_t available = ffile->size - ffile->position;
         if (size > available) {
                 size = available;
-                PrintfQEMU("[FAT32] fat32_fs_read: adjusted size to %zu\n", size);
+                qemu_log_printf("[FAT32] fat32_fs_read: adjusted size to %zu\n", size);
         }
         if (size == 0) return 0;
 
@@ -1309,7 +1309,7 @@ extern "C" {
                 // Быстрый выход, если диска нет — чтобы не зависать на попытках чтения
                 ata_drive_t* d0 = ata_get_drive(0);
                 if (!d0 || !d0->present) {
-                        PrintfQEMU("[FAT32] skip: no drive 0 present, not mounting\n");
+                        qemu_log_printf("[FAT32] skip: no drive 0 present, not mounting\n");
                         return -19; // -ENODEV
                 }
                 return fat32_mount(0);

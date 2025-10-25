@@ -109,6 +109,9 @@ fs_interface_t* vfs_get_interface();
 int vfs_mount_from_cpio(const void* data, unsigned long size);
 // kernel log append API to expose /dev/kmsg-like stream
 void vfs_klog_append(const char* s, unsigned long n);
+// devfs-like helpers exposed by VFS implementation
+int vfs_dev_create_dir(const char* path);
+int vfs_dev_create_file(const char* path, const void* data, unsigned long size);
 #ifdef __cplusplus
 }
 #endif

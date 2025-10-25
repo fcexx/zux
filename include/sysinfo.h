@@ -2,6 +2,7 @@
 #define SYSINFO_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -80,6 +81,7 @@ typedef struct {
 
 // Initialize system information detection
 void sysinfo_init();
+void sysinfo_init_with_multiboot2(uint64_t multiboot2_info_ptr);
 
 // Get CPU information
 int sysinfo_get_cpu_info(cpu_info_t* info);
