@@ -8,6 +8,7 @@ build/
 
 # Disk images and VM artifacts
 zux.img
+zux.iso
 zux.vmdk
 zux.vmdk.lck/
 *.img
