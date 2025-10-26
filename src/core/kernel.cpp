@@ -13,6 +13,7 @@
 #include <ps2.h>
 #include <iothread.h>
 #include <zux.h>
+#include <fonts.h>
 #include <fs_interface.h>
 #include <fat32.h>
 #include <gdt.h>
@@ -290,6 +291,7 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
                 // disable frame showing until early initialization is complete
                 vbe_set_present_enabled(0);
                 vbec_init_console();
+                vbec_set_font(ibm_vga_9x16, (uint32_t)sizeof(ibm_vga_9x16), 9, 16);
                 // Разрешаем прерывания после готовности консоли, чтобы PIT начал тикать к моменту логов
                 asm volatile ("sti");
                 klog_reset_time_base();

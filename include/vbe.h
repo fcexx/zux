@@ -38,6 +38,8 @@ void vbec_scroll_up(uint8_t bg_idx);
 void vbec_set_cursor(uint32_t x, uint32_t y);
 void vbec_get_cursor(uint32_t* x, uint32_t* y);
 
+int vbec_set_font(const void* data, uint32_t data_size, uint8_t width, uint8_t height);
+
 uint32_t vbec_get_width();
 uint32_t vbec_get_height();
 uint32_t vbe_get_cons_width();

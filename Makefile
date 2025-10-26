@@ -77,9 +77,9 @@ clean:
 	sudo rm -rf $(BUILDDIR) zux.iso
 
 run:
-	@qemu-system-x86_64 -cdrom zux.iso -m 1024M -debugcon stdio -hda ../hda.img -boot d -vga cirrus
+	@qemu-system-x86_64 -cdrom zux.iso -m 1024M -debugcon stdio -hda ../hda.img -boot d
 run-uefi:
-	@qemu-system-x86_64 -cdrom zux.iso -m 1200M -debugcon stdio -hda ../hda.img -boot d -vga cirrus -bios /usr/share/OVMF/OVMF_CODE.fd
+	@qemu-system-x86_64 -cdrom zux.iso -m 1200M -debugcon stdio -hda ../hda.img -boot d -vga virtio -bios /usr/share/OVMF/OVMF_CODE.fd
 
 debug:
 	qemu-system-x86_64 -cdrom zux.iso -m 512M -s -S -debugcon stdio

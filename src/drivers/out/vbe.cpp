@@ -1,7 +1,7 @@
 #include <vbe.h>
 #include <debug.h>
 #include <heap.h>
-#include <fonts/font9x16-ibm-vga.h>
+#include <fonts.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
@@ -15,8 +15,15 @@ static bool g_fb_initialized = false;
 static uint32_t* g_backbuffer = nullptr; // double-buffer in system memory
 static uint32_t* g_frontbuffer = nullptr; // alias to g_fb_addr
 static uint32_t g_cons_w = 0, g_cons_h = 0; // text grid size
-static const uint32_t g_cell_w = 9; // 9x16 VGA glyphs
-static const uint32_t g_cell_h = 16;
+static uint32_t g_cell_w = 9; // 9x16 VGA glyphs
+static uint32_t g_cell_h = 16;
+/* Dynamic font storage: contiguous array of uint16_t rows.
+   Layout: glyph0_row0, glyph0_row1, ..., glyph0_rowN-1,
+           glyph1_row0, ...
+   g_font_glyphs = number of glyphs, g_font_rows = rows per glyph. */
+static uint16_t *g_font = nullptr;
+static uint32_t g_font_glyphs = 0;
+static uint32_t g_font_rows = 0;
 static uint32_t g_cursor_x = 0, g_cursor_y = 0;
 // Track previously drawn cursor to restore underlying pixels from backbuffer
 static bool g_prev_cursor_drawn = false;
@@ -278,7 +285,9 @@ void vbec_init_console() {
         }
     }
         // 9x16 font grid and palette
-        g_cons_w = g_fb_width / g_cell_w + 1; // Added +1 because of the division: we dont get full width, 87 instead of 88, so we add +1 to avoid losing a column
+        if (g_fb_width % g_cell_w == 0) g_cons_w = g_fb_width / g_cell_w;
+        else g_cons_w = g_fb_width / g_cell_w + 1;
+        
         g_cons_h = g_fb_height / g_cell_h;
         g_palette[0]=0xFF000000; g_palette[1]=0xFF0000AA; g_palette[2]=0xFF00AA00; g_palette[3]=0xFF00AAAA;
         g_palette[4]=0xFFAA0000; g_palette[5]=0xFFAA00AA; g_palette[6]=0xFFAA5500; g_palette[7]=0xFFAAAAAA;
@@ -295,12 +304,21 @@ void vbec_set_palette_entry(uint8_t idx, uint8_t r, uint8_t g, uint8_t b) {
 void vbec_set_fg(uint8_t idx) { (void)idx; }
 void vbec_set_bg(uint8_t idx) { (void)idx; }
 
-// glyphs come from included header font9x16-ibm-vga.h (each row uses lower 9 bits)
+// glyphs come from included header font9x16-ibm-vga.h (each row uses lower bits)
 static void vbec_draw_char(uint32_t cx, uint32_t cy, char c, uint32_t fg, uint32_t bg) {
         uint64_t irqf = vbe_enter_cs();
         uint32_t x0 = cx * g_cell_w; uint32_t y0 = cy * g_cell_h;
-        const uint16_t* glyph = ibm_vga_9x16[(unsigned char)c];
-        for (uint32_t row = 0; row < g_cell_h; ++row) {
+        unsigned int glyph_index = (unsigned char)c;
+        if (g_font == nullptr || g_font_rows == 0 || g_font_glyphs == 0) {
+                /* nothing to draw */
+                vbe_leave_cs(irqf);
+                return;
+        }
+        if (glyph_index >= g_font_glyphs) glyph_index = 0; /* fallback */
+        uint16_t *glyph = g_font + (size_t)glyph_index * (size_t)g_font_rows;
+        uint32_t rows_to_draw = g_cell_h;
+        if (rows_to_draw > g_font_rows) rows_to_draw = g_font_rows;
+        for (uint32_t row = 0; row < rows_to_draw; ++row) {
                 uint16_t bits = glyph[row];
                 uint32_t y_phys = (uint32_t)((y0 + row + g_scroll_px_off) % g_fb_height);
                 size_t base_index = (size_t)y_phys * (size_t)g_fb_width + (size_t)x0;
@@ -407,3 +425,35 @@ void vbec_clear() {
 	g_cursor_y = 0;
 }
 
+int vbec_set_font(const void* data, uint32_t data_size, uint8_t width, uint8_t height) {
+        if (data == nullptr || data_size == 0 || width == 0 || height == 0) return -1;
+        /* free previous font storage if allocated */
+        if (g_font) {
+                kfree(g_font);
+                g_font = nullptr;
+                g_font_glyphs = 0;
+                g_font_rows = 0;
+        }
+        /* determine how many bytes we will store */
+        size_t to_copy = (size_t)data_size;
+        if (to_copy == 0) return -1;
+        /* allocate storage for the incoming font data */
+        uint16_t *buf = (uint16_t*)kmalloc(to_copy);
+        if (buf == nullptr) return -1;
+        memcpy(buf, data, to_copy);
+        /* compute glyph count: rows per glyph == height (uint16_t rows)
+           glyphs = bytes / (rows * sizeof(uint16_t)) */
+        size_t rows = (size_t)height;
+        size_t glyphs = to_copy / (rows * sizeof(uint16_t));
+        if (glyphs == 0) {
+                /* not enough data for even one glyph */
+                kfree(buf);
+                return -1;
+        }
+        g_font = buf;
+        g_font_glyphs = (uint32_t)glyphs;
+        g_font_rows = (uint32_t)rows;
+        g_cell_w = width;
+        g_cell_h = height;
+        return 0;
+}
