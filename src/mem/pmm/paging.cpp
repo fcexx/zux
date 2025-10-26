@@ -114,6 +114,16 @@ void paging_init() {
                 qemu_log_printf("[paging] mapped framebuffer at 0x%llx size=0x%llx\n", (unsigned long long)fb_base, (unsigned long long)map_size);
                 }
         }
+
+        // Map SMBIOS table if present (for UEFI)
+        extern uint64_t g_smbios_addr; extern uint32_t g_smbios_len;
+        if (g_smbios_addr && g_smbios_len) {
+                uint64_t base = g_smbios_addr & ~0xFFFULL;
+                uint64_t sz = ((g_smbios_addr + g_smbios_len) - base + 0xFFFULL) & ~0xFFFULL;
+                paging_map_range(base, base, sz, PAGE_PRESENT);
+                qemu_log_printf("[paging] mapped SMBIOS at 0x%llx size=0x%llx\n",
+                        (unsigned long long)base, (unsigned long long)sz);
+        }
         
         // Load CR3
         paging_load_cr3((uint64_t)&page_table_l4);

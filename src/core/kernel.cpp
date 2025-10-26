@@ -20,9 +20,22 @@
 #include <elf.h>
 #include <sysinfo.h>
 #include <pci.h>
-#include <cirrus.h>
-#include <stddef.h>
-#include <stdint.h>
+#include <dmi.h>
+#include <efi.h>
+// SMBIOS GUIDs
+static const EFI_GUID SMBIOS_GUID  = {0xEB9D2D31,0x2D88,0x11D3,{0x9A,0x16,0x00,0x90,0x27,0x3F,0xC1,0x4D}};
+static const EFI_GUID SMBIOS3_GUID = {0xF2FD1544,0x9794,0x4A2C,{0x99,0x2E,0xE5,0xBB,0xCF,0x20,0xE3,0x94}};
+
+struct multiboot2_tag_efi64 { uint32_t type; uint32_t size; uint64_t efi_system_table; };
+
+struct multiboot2_tag_smbios {
+    uint32_t type;
+    uint32_t size;
+    uint8_t  major;
+    uint8_t  minor;
+    uint8_t  reserved[6];
+    uint64_t table_phys; // physical address of SMBIOS EP
+};
 
 char g_tty_private_tag = 0;
 
@@ -66,6 +79,8 @@ extern "C" void enable_sse() {
         asm volatile ("mov %0, %%cr4" :: "r"(cr4));
     }
 
+    extern "C" uint64_t g_smbios_addr;
+extern "C" uint32_t g_smbios_len;
 void parse_multiboot2(uint64_t addr) {
         struct multiboot2_tag* tag;
         
@@ -117,6 +132,27 @@ void parse_multiboot2(uint64_t addr) {
                                                 fb_mod_size  = size;
                                                 have_fallback = true;
                                         }
+                                }
+                                break;
+                        }
+                        case 23: { // SMBIOS
+                                auto* s = (multiboot2_tag_smbios*)tag;
+                                g_smbios_addr = s->table_phys;
+                                g_smbios_len  = s->size - sizeof(multiboot2_tag_smbios);
+                                qemu_log_printf("Found SMBIOS tag addr=0x%llx len=%u\n",
+                                        (unsigned long long)g_smbios_addr, g_smbios_len);
+                                break;
+                        }
+                        case 20: { // EFI 64 system table
+                                auto* e = (multiboot2_tag_efi64*)tag;
+                                EFI_SYSTEM_TABLE* st = (EFI_SYSTEM_TABLE*)(uintptr_t)e->efi_system_table;
+                                for(uint64_t i=0;i<st->NumberOfTableEntries;i++){
+                                    EFI_CONFIGURATION_TABLE* ct = &st->ConfigurationTable[i];
+                                    if (guid_eq(&ct->VendorGuid,&SMBIOS_GUID) || guid_eq(&ct->VendorGuid,&SMBIOS3_GUID)){
+                                        g_smbios_addr = (uint64_t)(uintptr_t)ct->VendorTable;
+                                        g_smbios_len = 0x10000; // map first 64KB; exact length parsed later
+                                        qemu_log_printf("EFI: found SMBIOS table @0x%llx\n", (unsigned long long)g_smbios_addr);
+                                    }
                                 }
                                 break;
                         }
@@ -318,7 +354,7 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
         // Обновим стек для входа SYSCALL (используется syscall_entry.S)
         extern uint64_t syscall_kernel_rsp0;
         syscall_kernel_rsp0 = kstack_top;
-
+        dmi_scan();
         syscall_init();
         PrintQEMU("[syscall] init x86_64 SYSCALL...\n");
         syscall_x64_init();
@@ -359,8 +395,7 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
         // Инициализируем PCI после монтирования VFS, чтобы опубликовать /dev/pci/*
         // Запускаем в самом конце ранней инициализации, после включения прерываний, консоли и VFS
         pci_init();
-        clgd54xx_init();
-        clgd54xx_set_mode(800, 600, 32);
+        dmi_scan();
         if (vbe_is_initialized()) vbe_set_present_enabled(1);
 
 
