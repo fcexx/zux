@@ -11,7 +11,11 @@ mb2_start:
 
         ; Тег запроса видеорежима (Multiboot2 framebuffer request)
         align 8
+        %ifdef K_USE_VBE
         dw 5                                                 ; type = 5 (framebuffer)
+        %else
+        dw 0                                                 ; type = 5 (framebuffer)
+        %endif
         dw 0                                                 ; flags (optional)
         dd 20                                                ; размер
         dd 0                                                 ; ширина (0 = лучший доступный режим)

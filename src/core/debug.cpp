@@ -1,6 +1,7 @@
 #include <debug.h>
 #include <stdarg.h>
 #include <string.h>
+#include <vbetty.h>
 #include <stdint.h>
 #include <pit.h>
 #include <fs_interface.h>

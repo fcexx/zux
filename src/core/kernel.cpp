@@ -19,6 +19,7 @@
 #include <gdt.h>
 #include <syscall.h>
 #include <elf.h>
+#include <cirrus.h>
 #include <sysinfo.h>
 #include <pci.h>
 #include <dmi.h>
@@ -35,14 +36,14 @@ struct multiboot2_tag_smbios {
     uint8_t  major;
     uint8_t  minor;
     uint8_t  reserved[6];
-    uint64_t table_phys; // physical address of SMBIOS EP
+    uint64_t table_phys; /* physical address of SMBIOS EP */
 };
 
 char g_tty_private_tag = 0;
 
-// Фреймбуфер инициализируется через vbe_init() в parse_multiboot2
+/* Фреймбуфер инициализируется через vbe_init() в parse_multiboot2 */
 
-// Запуск интерактивного шелла по умолчанию (busybox sh -i)
+/* Запуск интерактивного шелла по умолчанию (busybox sh -i) */
 extern "C" void start_default_shell();
 
 // Убрано: любые глобалы, связанные с TLS
@@ -269,10 +270,6 @@ static int kexecve(const char* path, const char* const* argv){
         return 0;
 }
 
-void process_exit() {
-        for(;;){ klog_printf("process\n"); }
-}
-
 extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_ptr) {
         enable_sse();
         parse_multiboot2(multiboot2_info_ptr);
@@ -287,23 +284,11 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
 
         // Сначала инициализируем heap, затем консоль (для VBE backbuffer)
         heap_init();
-        if (vbe_is_initialized()) {
-                // disable frame showing until early initialization is complete
-                vbe_set_present_enabled(0);
-                vbec_init_console();
-                vbec_set_font(ibm_vga_9x16, (uint32_t)sizeof(ibm_vga_9x16), 9, 16);
-                // Разрешаем прерывания после готовности консоли, чтобы PIT начал тикать к моменту логов
-                asm volatile ("sti");
-                klog_reset_time_base();
-                klog_printf("kernel_main: kernel started with active interrupts\n");
-                klog_printf("framebuffer console %ux%u 16 colors initialized\n\n", vbe_get_cons_width(), vbe_get_cons_height());
-        } else {
-                vga_init();
-                vga_clear(7, 0);
-                asm volatile ("sti");
-                klog_reset_time_base();
-                klog_printf("vga: text console 80x25 16 colors initialized\n\n");
-        }
+        asm volatile ("sti");
+        klog_reset_time_base();
+        vga_init();
+        vga_clear(7, 0);
+        klog_printf("vga: text console 80x25 16 colors initialized\n\n");
         ps2_keyboard_init();
         klog_printf("%s kernel version %s\n", ZUX_NAME, ZUX_VERSION_FULL);
         
@@ -316,6 +301,7 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
         iothread_init();
 
         gdt_init();
+        qemu_log_printf("dewfe");
         void* kstack = kmalloc_aligned(16384, 4096);
         if (!kstack) {
                 // try plain kmalloc and align the result manually to 4KB
@@ -397,12 +383,31 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
         // Инициализируем PCI после монтирования VFS, чтобы опубликовать /dev/pci/*
         // Запускаем в самом конце ранней инициализации, после включения прерываний, консоли и VFS
         pci_init();
+        // Initialize Cirrus driver now that PCI is up
+        cirrus_init();
         dmi_scan();
         if (vbe_is_initialized()) vbe_set_present_enabled(1);
+
+#ifdef K_CIRRUS_DRIVER
+        // If Cirrus was detected, switch console over now.
+        if (cirrus_console_ready()) {
+                klog_printf("vga: switching console to cirrus framebuffer\n");
+                // copy current text buffer into cirrus framebuffer and enable backend
+                cirrus_takeover_console();
+                extern int g_vga_force_legacy;
+                g_vga_force_legacy = 0; // allow cirrus/vbe backends
+        } else {
+                klog_printf("vga: no cirrus device - remaining on legacy VGA text\n");
+        }
+#endif
 
 
         // const char* argv_fallback[] = { "busybox", "sh", "-i", nullptr };
         // (void)kexecve("/bin/busybox", argv_fallback);
+
+#ifdef KITTY
+        klog_printf("kitty!");
+#endif
 
         for(;;);
 }

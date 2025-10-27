@@ -17,15 +17,25 @@ static uint8_t fg_idx = 7;
 static uint8_t bg_idx = 0;
 static bool ansi_bold = false;
 
+// Reference the global force flag defined in vga.cpp
+// g_vga_force_legacy is defined in src/drivers/out/vga.cpp
+extern int g_vga_force_legacy;
+
 spinlock_t vga_printf_lock = {0};
 
 static inline void vga_newline() {
-        cur_x = 0;
-    if (++cur_y >= cons_h) {
-        if (vbe_console_ready()) vbec_scroll_up(bg_idx); else vga_scroll_up(bg_idx);
-                cur_y = cons_h - 1;
+        uint32_t x, y;
+        vga_get_cursor(&x, &y);
+        x = 0;
+    if (++y >= cons_h) {
+        if (g_vga_force_legacy) vga_scroll_up(bg_idx);
+        else if (vbe_console_ready()) vbec_scroll_up(bg_idx);
+        else vga_scroll_up(bg_idx);
+                y = cons_h - 1;
         }
-    if (vbe_console_ready()) vbec_set_cursor(cur_x, cur_y); else vga_set_cursor(cur_x, cur_y);
+    if (g_vga_force_legacy) vga_set_cursor(x, y);
+    else if (vbe_console_ready()) vbec_set_cursor(x, y);
+    else vga_set_cursor(x, y);
 }
 
 // buffered VFS line append to avoid per-char reallocs
@@ -41,18 +51,37 @@ static inline void klog_linebuf_push(char c){
 }
 
 static inline void vga_putc(char c) {
+        // always synchronize with driver cursor state
+        uint32_t local_x = 0, local_y = 0;
+        vga_get_cursor(&local_x, &local_y);
+
         if (c == '\n') { vga_newline(); extern void vfs_klog_append(const char*, unsigned long); vfs_klog_append("\n", 1); return; }
-    if (c == '\r') { cur_x = 0; if (vbe_console_ready()) vbec_set_cursor(cur_x, cur_y); else vga_set_cursor(cur_x, cur_y); return; }
-        if (c == '\b') {
-                if (cur_x > 0) { cur_x--; }
-                else if (cur_y > 0) { cur_y--; cur_x = cons_w - 1; }
-        if (vbe_console_ready()) vbec_put_cell(cur_x, cur_y, ' ', fg_idx, bg_idx); else vga_put_cell(cur_x, cur_y, ' ', fg_idx, bg_idx);
-        if (vbe_console_ready()) vbec_set_cursor(cur_x, cur_y); else vga_set_cursor(cur_x, cur_y);
-                return;
-        }
-    if (cur_x >= cons_w) { vga_newline(); }
-    if (vbe_console_ready()) vbec_put_cell(cur_x, cur_y, c, fg_idx, bg_idx); else vga_put_cell(cur_x, cur_y, c, fg_idx, bg_idx);
-    if (++cur_x >= cons_w) vga_newline(); else { if (vbe_console_ready()) vbec_set_cursor(cur_x, cur_y); else vga_set_cursor(cur_x, cur_y); }
+
+    if (c == '\r') {
+        local_x = 0;
+        if (vbe_console_ready()) vbec_set_cursor(local_x, local_y); else vga_set_cursor(local_x, local_y);
+        return;
+    }
+
+    if (c == '\b') {
+        if (local_x > 0) { local_x--; }
+        else if (local_y > 0) { local_y--; local_x = cons_w - 1; }
+        if (vbe_console_ready()) vbec_put_cell(local_x, local_y, ' ', fg_idx, bg_idx); else vga_put_cell(local_x, local_y, ' ', fg_idx, bg_idx);
+        if (vbe_console_ready()) vbec_set_cursor(local_x, local_y); else vga_set_cursor(local_x, local_y);
+        return;
+    }
+
+    if (local_x >= cons_w) { vga_newline(); vga_get_cursor(&local_x, &local_y); }
+
+    if (vbe_console_ready()) vbec_put_cell(local_x, local_y, c, fg_idx, bg_idx); else vga_put_cell(local_x, local_y, c, fg_idx, bg_idx);
+
+    local_x++;
+    if (local_x >= cons_w) {
+        vga_newline();
+    } else {
+        if (vbe_console_ready()) vbec_set_cursor(local_x, local_y); else vga_set_cursor(local_x, local_y);
+    }
+
     // append to VFS kernel log (buffered until newline)
     klog_linebuf_push(c);
 }
@@ -122,7 +151,7 @@ static inline int hex_nibble(char c) {
         return -1;
 }
 
-int kprintf(const char* fmt, ...) {
+extern "C" int kprintf(const char* fmt, ...) {
         acquire(&vga_printf_lock);
         
 

@@ -23,5 +23,3 @@ int kprintf(const char* fmt, ...);
 #endif
 
 #endif // VGA_H
-
-

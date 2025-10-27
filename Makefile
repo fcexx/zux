@@ -7,6 +7,11 @@ AS = nasm
 GAS = $(TARGET)-as
 LD = $(TARGET)-ld
 
+# Read .config and export all KEY=y as -DKEY for C/C++/C and -DKEY=1 for NASM
+# Lines in .config must be like: KEY=y or KEY=n
+DEFS := $(shell awk -F= '/^[A-Z0-9_]+=y/ { printf("-D%s ", $$1) }' .config 2>/dev/null)
+NASM_DEFS := $(shell awk -F= '/^[A-Z0-9_]+=y/ { printf("-D%s=1 ", $$1) }' .config 2>/dev/null)
+
 SRCDIR = src
 BUILDDIR = build
 OBJDIR = $(BUILDDIR)/obj
@@ -34,13 +39,14 @@ all: $(BINDIR)/zuxImg zux.iso
 $(BINDIR)/zuxImg: $(OBJECTS)
 	@mkdir -p $(dir $@)
 	@echo Linking...
-	@$(LD) -n -o $@ -T linker.ld $(OBJECTS)
+	@$(LD) -n -o $@ -T linker.ld --allow-multiple-definition $(OBJECTS)
 
 hda/boot/zuxImg: $(BINDIR)/zuxImg
 	@mkdir -p $(dir $@)
 	@cp $< $@
 
 zux.iso: hda/boot/zuxImg hda/boot/grub/grub.cfg
+	@echo !!KERNEL DONE!!: zuxImg
 	@echo "Creating bootable ISO: $@"
 	@mkdir -p $(BUILDDIR)/isodir/boot/grub
 	@cp hda/boot/zuxImg $(BUILDDIR)/isodir/boot/zuxImg
@@ -50,8 +56,8 @@ zux.iso: hda/boot/zuxImg hda/boot/grub/grub.cfg
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.asm
 	@mkdir -p $(dir $@)
-	@echo "NASM		$<"
-	@$(AS) -f elf64 $< -o $@
+	@echo "NASM		$< $(NASM_DEFS)"
+	@$(AS) $(NASM_DEFS) -f elf64 $< -o $@
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.S
 	@mkdir -p $(dir $@)
@@ -60,29 +66,33 @@ $(OBJDIR)/%.o: $(SRCDIR)/%.S
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.cpp
 	@mkdir -p $(dir $@)
-	@echo "CPP		$<"
-	@$(CC) -c $< -o $@ -std=c++17 -ffreestanding -fno-exceptions -fno-rtti -Wall -Wextra -g -Iinclude -w
+	@echo "CPP		$< $(DEFS)"
+	@$(CC) -c $< -o $@ -std=c++17 -ffreestanding -fno-exceptions -fno-rtti -Wall -Wextra -g -Iinclude -w $(DEFS)
 
 $(OBJDIR)/%.o: libc/%.cpp
 	@mkdir -p $(dir $@)
-	@echo "CPP		$<"
-	@$(CC) -c $< -o $@ -std=c++17 -ffreestanding -fno-exceptions -fno-rtti -Wall -Wextra -g -Iinclude -w
+	@echo "CPP		$< $(DEFS)"
+	@$(CC) -c $< -o $@ -std=c++17 -ffreestanding -fno-exceptions -fno-rtti -Wall -Wextra -g -Iinclude -w $(DEFS)
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.c
 	@mkdir -p $(dir $@)
 	@echo "CC 		$<"
-	@x86_64-elf-gcc -c $< -o $@ -std=gnu11 -ffreestanding -Wall -Wextra -g -Iinclude -w
+	@x86_64-elf-gcc -c $< -o $@ -std=gnu11 -ffreestanding -Wall -Wextra -g -Iinclude -w $(DEFS)
 
 clean:
 	sudo rm -rf $(BUILDDIR) zux.iso
 
 run:
-	@qemu-system-x86_64 -cdrom zux.iso -m 1024M -debugcon stdio -hda ../hda.img -boot d
+	@qemu-system-x86_64 -cdrom zux.iso -m 1024M -debugcon stdio -hda ../hda.img -boot d -vga cirrus
 run-uefi:
 	@qemu-system-x86_64 -cdrom zux.iso -m 1200M -debugcon stdio -hda ../hda.img -boot d -vga virtio -bios /usr/share/OVMF/OVMF_CODE.fd
 
 debug:
-	qemu-system-x86_64 -cdrom zux.iso -m 512M -s -S -debugcon stdio
+	qemu-system-x86_64 -cdrom zux.iso -m 512M -s -S -debugcon stdio &
+	QEMU_PID=$!
+	sleep 2
+	gdb -x debug.gdb
+	kill $QEMU_PID 
 
 vmdk:
 	@echo "Not supported for ISO build"

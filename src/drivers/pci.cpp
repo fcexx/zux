@@ -27,6 +27,19 @@ static uint8_t pci_read8(uint8_t bus, uint8_t device, uint8_t function, uint8_t 
         return (uint8_t)((v >> ((offset & 3) * 8)) & 0xFF);
 }
 
+// Exported helpers (defined here for other drivers)
+uint32_t pci_config_read32(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset){
+        return pci_read32(bus, device, function, offset);
+}
+
+uint16_t pci_config_read16(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset){
+        return pci_read16(bus, device, function, offset);
+}
+
+uint8_t pci_config_read8(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset){
+        return pci_read8(bus, device, function, offset);
+}
+
 static void publish_pci_device(const pci_device_info_t* info, int index){
         // Лог в dmesg стиле
         klog_printf("pci: %02x:%02x.%x vendor=%04x device=%04x class=%02x subclass=%02x prog_if=%02x header=%02x",
@@ -105,14 +118,14 @@ static void scan_bus(){
 void pci_init(void){
         // Создаём /dev/pci и сканируем шину в краткой критической секции, чтобы
         // исключить гонки с логгингом/потоками во время ранней инициализации
-        unsigned long flags; asm volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
-        vfs_dev_create_dir("/dev");
-        vfs_dev_create_dir("/dev/pci");
-        asm volatile("push %0; popfq" :: "r"(flags) : "memory", "cc");
+        // unsigned long flags; asm volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
+        // vfs_dev_create_dir("/dev");
+        // vfs_dev_create_dir("/dev/pci");
+        // asm volatile("push %0; popfq" :: "r"(flags) : "memory", "cc");
 
-        klog_printf("pci: scanning buses...");
+        klog_printf("pci: Scanning buses...");
         scan_bus();
-        klog_printf("pci: scan done");
+        klog_printf("pci: Scan done.");
 }
 
 

@@ -115,6 +115,16 @@ void paging_init() {
                 }
         }
 
+        // Map legacy VGA text buffer: map kernel virtual 0xC00B8000 -> physical 0x000B8000
+        // This allows early console code to write to VGA text memory at virtual address used in vga.cpp
+        {
+                uint64_t vga_virt = 0xC00B8000ULL;
+                uint64_t vga_phys = 0x000B8000ULL;
+                // Allow user-mode processes to access the VGA text buffer (some tests write from userland)
+                paging_map_range(vga_virt, vga_phys, 0x1000ULL, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+                qemu_log_printf("[paging] mapped VGA text buffer virt=0x%llx -> phys=0x%llx\n", (unsigned long long)vga_virt, (unsigned long long)vga_phys);
+        }
+
         // Map SMBIOS table if present (for UEFI)
         extern uint64_t g_smbios_addr; extern uint32_t g_smbios_len;
         if (g_smbios_addr && g_smbios_len) {
