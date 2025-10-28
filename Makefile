@@ -94,5 +94,9 @@ debug:
 	gdb -x debug.gdb
 	kill $QEMU_PID 
 
+kernel: $(BINDIR)/zuxImg
+	@echo "kernel done: " $<
+	@cp $< ./zuxImg
+
 vmdk:
 	@echo "Not supported for ISO build"
