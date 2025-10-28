@@ -1,0 +1,12 @@
+version: '3.8'
+services:
+  builder:
+    build: .
+    image: zux-cross-builder:local
+    volumes:
+      - ..:/work:cached
+    working_dir: /work
+    entrypoint: ["/bin/bash", "-lc"]
+    command: "export PATH=/opt/cross/bin:$PATH && make -j$(nproc)"
+
+

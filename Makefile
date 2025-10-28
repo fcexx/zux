@@ -83,9 +83,17 @@ clean:
 	sudo rm -rf $(BUILDDIR) zux.iso
 
 run:
-	@qemu-system-x86_64 -cdrom zux.iso -m 1024M -debugcon stdio -iso ../iso.img -boot d -vga cirrus
+	@qemu-system-x86_64 -cdrom zux.iso -m 1024M -debugcon stdio -boot d
+
+.PHONY: docker-build
+docker-build:
+	./docker_build.sh
+
+.PHONY: docker-build-cross
+docker-build-cross:
+	./docker/build-cross.sh
 run-uefi:
-	@qemu-system-x86_64 -cdrom zux.iso -m 1200M -debugcon stdio -iso ../iso.img -boot d -vga virtio -bios /usr/share/OVMF/OVMF_CODE.fd
+	@qemu-system-x86_64 -cdrom zux.iso -m 1200M -debugcon stdio -boot d -vga virtio -bios /usr/share/OVMF/OVMF_CODE.fd
 
 debug:
 	qemu-system-x86_64 -cdrom zux.iso -m 512M -s -S -debugcon stdio &

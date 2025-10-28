@@ -39,6 +39,9 @@ static uint32_t g_cursor_period_ms = 50; // blink each 500ms like VGA
 static uint32_t g_scroll_px_off = 0;
 static int g_present_enabled = 1;
 // Неблокирующий (неатомарный) спин‑флаг для критических секций VBE
+/* Make vbe critical-section flag atomic-ish: use 0==free, 1==locked.
+   We implement simple test-and-set using xchg to avoid race where IRQ handler
+   may leave flag set. This reduces likelihood of permanent 'in_cs' sticky state. */
 static volatile int g_vbe_in_cs = 0;
 
 static inline uint64_t vbe_irq_save_disable(){
@@ -47,8 +50,30 @@ static inline uint64_t vbe_irq_save_disable(){
 static inline void vbe_irq_restore(uint64_t flags){
         asm volatile("push %0; popfq" :: "r"(flags) : "memory", "cc");
 }
-static inline uint64_t vbe_enter_cs(){ uint64_t f = vbe_irq_save_disable(); g_vbe_in_cs = 1; return f; }
-static inline void vbe_leave_cs(uint64_t f){ g_vbe_in_cs = 0; vbe_irq_restore(f); }
+static inline uint64_t vbe_enter_cs(){
+        uint64_t f = vbe_irq_save_disable();
+        // Acquire lock: spin until we successfully swap 0->1.
+        while (!__sync_bool_compare_and_swap(&g_vbe_in_cs, 0, 1)) {
+                // busy-wait briefly; interrupts are disabled so this should be short
+        }
+        return f;
+}
+static inline void vbe_leave_cs(uint64_t f){
+        // Release and restore IRQs
+        __sync_lock_release(&g_vbe_in_cs);
+        vbe_irq_restore(f);
+}
+
+// Try to enter critical section without blocking; returns true and fills flags if entered.
+static inline bool vbe_try_enter_cs(uint64_t *out_flags) {
+        uint64_t f = vbe_irq_save_disable();
+        if (__sync_bool_compare_and_swap(&g_vbe_in_cs, 0, 1)) {
+                if (out_flags) *out_flags = f;
+                return true;
+        }
+        vbe_irq_restore(f);
+        return false;
+}
 
 // kmalloc/kfree from heap.h
 
@@ -74,6 +99,8 @@ void vbe_init(uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch, ui
         // Разрешим 16/24/32 bpp. Для 16 bpp используем RGB565 при выводе
         g_fb_initialized = (g_fb_addr != nullptr) && width && height && pitch && (bpp == 32 || bpp == 24 || bpp == 16);
     g_frontbuffer = g_fb_addr;
+    g_cursor_x = 0;
+    g_cursor_y = 0;
 }
 
 bool vbe_is_initialized() {
@@ -128,14 +155,20 @@ void vbe_force_unlock(){ g_vbe_in_cs = 0; }
 
 void vbe_swap() {
 	if (!g_fb_initialized || !g_backbuffer || !g_frontbuffer) return;
-        if (!g_fb_dirty || !g_present_enabled) return; // present only if something changed and enabled
-        if (g_vbe_in_cs) return; // пропускаем кадр, если идёт запись в backbuffer
+    if (!g_fb_dirty || !g_present_enabled) return; // present only if something changed and enabled
+    uint64_t irqf_try = 0; bool entered = vbe_try_enter_cs(&irqf_try);
+    if (!entered) {
+                // If locked, don't clear dirty so next tick will retry. Log once in a while.
+                static int skip_cnt = 0; if ((++skip_cnt & 0xFF) == 0) qemu_log_printf("[vbe] swap skipped: in_cs=1\n");
+                return;
+    }
+    // we hold the lock now; will release at the end of swap via vbe_leave_cs(irqf_try)
         // clamp dirty rectangle
         uint32_t x0 = (g_dirty_x0 < g_fb_width ? g_dirty_x0 : g_fb_width);
         uint32_t y0 = (g_dirty_y0 < g_fb_height ? g_dirty_y0 : g_fb_height);
         uint32_t x1 = (g_dirty_x1 <= g_fb_width ? g_dirty_x1 : g_fb_width);
         uint32_t y1 = (g_dirty_y1 <= g_fb_height ? g_dirty_y1 : g_fb_height);
-        if (x1 <= x0 || y1 <= y0) { g_fb_dirty = false; return; }
+        if (x1 <= x0 || y1 <= y0) { g_fb_dirty = false; vbe_leave_cs(irqf_try); return; }
     // copy backbuffer to frontbuffer respecting pitch
     uint8_t* src = (uint8_t*)g_backbuffer;
     uint8_t* dst = (uint8_t*)g_frontbuffer;
@@ -261,6 +294,8 @@ void vbe_swap() {
         }
 
         g_fb_dirty = false; g_dirty_x0 = g_dirty_y0 = 0; g_dirty_x1 = g_dirty_y1 = 0;
+        vbe_leave_cs(irqf_try);
+        return;
 }
 
 // ----- VBE Console (text) -----
@@ -306,7 +341,40 @@ void vbec_init_console() {
         g_palette[8]=0xFF555555; g_palette[9]=0xFF5555FF; g_palette[10]=0xFF55FF55; g_palette[11]=0xFF55FFFF;
         g_palette[12]=0xFFFF5555; g_palette[13]=0xFFFF55FF; g_palette[14]=0xFFFFFF55; g_palette[15]=0xFFFFFFFF;
         g_cursor_x = g_cursor_y = 0;
-	vbe_clear(0x00000000);
+    vbe_clear(0x00000000);
+    // Immediately push backbuffer to frontbuffer once to avoid stale/garbled top line
+    if (g_backbuffer && g_frontbuffer && g_backbuffer != g_frontbuffer) {
+        uint64_t irqf = vbe_enter_cs();
+        uint8_t* src = (uint8_t*)g_backbuffer;
+        uint8_t* dst = (uint8_t*)g_frontbuffer;
+        size_t row_bytes_full = (size_t)g_fb_width * 4;
+        for (uint32_t y = 0; y < g_fb_height; ++y) {
+            uint8_t* srow = src + (size_t)y * row_bytes_full;
+            uint8_t* drow = dst + (size_t)y * (size_t)g_fb_pitch;
+            if (g_fb_bpp == 32) {
+                memcpy(drow, srow, (size_t)g_fb_width * 4);
+            } else if (g_fb_bpp == 24) {
+                uint32_t* s32 = (uint32_t*)srow;
+                for (uint32_t x = 0; x < g_fb_width; ++x) {
+                    uint32_t px = s32[x];
+                    drow[x*3+0] = (uint8_t)(px & 0xFF);
+                    drow[x*3+1] = (uint8_t)((px >> 8) & 0xFF);
+                    drow[x*3+2] = (uint8_t)((px >> 16) & 0xFF);
+                }
+            } else if (g_fb_bpp == 16) {
+                uint32_t* s32 = (uint32_t*)srow;
+                uint16_t* d16 = (uint16_t*)drow;
+                for (uint32_t x = 0; x < g_fb_width; ++x) {
+                    uint32_t c = s32[x];
+                    uint16_t r = (uint16_t)((c >> 19) & 0x1F);
+                    uint16_t g = (uint16_t)((c >> 10) & 0x3F);
+                    uint16_t b = (uint16_t)((c >> 3)  & 0x1F);
+                    d16[x] = (uint16_t)((r << 11) | (g << 5) | b);
+                }
+            }
+        }
+        vbe_leave_cs(irqf);
+    }
 }
 
 void vbec_set_palette_entry(uint8_t idx, uint8_t r, uint8_t g, uint8_t b) {

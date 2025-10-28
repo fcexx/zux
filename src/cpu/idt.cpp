@@ -106,11 +106,39 @@ static void ud_fault_handler(cpu_registers_t* regs) {
         for(;;){ asm volatile("sti; hlt":::"memory"); }
 }
 
+// Handle Divide-by-zero (INT 0). For user faults: kill process and return to idle;
+// for kernel faults: print diagnostics and halt.
+static void div_zero_handler(cpu_registers_t* regs) {
+        qemu_log_printf("[div0] divide by zero at RIP=0x%llx err=0x%llx\n", (unsigned long long)regs->rip, (unsigned long long)regs->error_code);
+        // If fault originated from user mode, terminate the user process safely
+        if ((regs->cs & 3) == 3) {
+                dump("divide by zero", "user", regs, 0, regs->error_code, true);
+                thread_t* user = thread_get_current_user();
+                if (user) {
+                        thread_stop((int)user->tid);
+                        thread_set_current_user(nullptr);
+                }
+                // leave CPU in idle loop to avoid returning into faulty user code
+                for(;;){ asm volatile("sti; hlt" ::: "memory"); }
+        }
+        // Kernel fault: print and halt
+        dump("divide by zero", "kernel", regs, 0, regs->error_code, false);
+        for(;;){ asm volatile("sti; hlt" ::: "memory"); }
+}
+
 static void page_fault_handler(cpu_registers_t* regs) {
     // Никакого рендера/свапа из обработчика PF
         unsigned long long cr2;
         asm volatile("mov %%cr2, %0" : "=r"(cr2));
         unsigned long long err = regs->error_code;
+        // Fast sanity: if registers are clearly invalid (null RIP or tiny RSP), avoid heavy dumps
+        // and drop to idle to prevent kernel from dereferencing bad user pointers.
+        if (regs->rip == 0 || regs->rsp < 0x1000) {
+                qemu_log_printf("[pf] invalid user regs detected RIP=0x%llx RSP=0x%llx; dropping to idle\n",
+                               (unsigned long long)regs->rip, (unsigned long long)regs->rsp);
+                if (vbe_is_initialized()) vbe_force_unlock();
+                for(;;){ asm volatile("sti; hlt" ::: "memory"); }
+        }
         int p = (err & 1) != 0;                  // 0: non-present, 1: protection
         int wr = (err & 2) != 0;                 // 0: read, 1: write
         int us = (err & 4) != 0;                 // 0: supervisor, 1: user
@@ -118,6 +146,22 @@ static void page_fault_handler(cpu_registers_t* regs) {
         int id = (err & 16) != 0;                // instruction fetch (if supported)
         // Если fault из user-space — завершаем текущий пользовательский процесс, не падая ядром
         if ((regs->cs & 3) == 3) {
+                // Quick sanity: if registers look clearly corrupted (RIP==0 or tiny RSP),
+                // avoid attempting to read user memory or stop a non-existent process —
+                // just idle to avoid crashing the kernel further.
+                if (regs->rip == 0 || regs->rsp < 0x1000) {
+                        qemu_log_printf("[pf] user PF with invalid regs RIP=0x%llx RSP=0x%llx; dropping to idle\n", (unsigned long long)regs->rip, (unsigned long long)regs->rsp);
+                        if (vbe_is_initialized()) vbe_force_unlock();
+                        for(;;){ asm volatile("sti; hlt" ::: "memory"); }
+                }
+                // If there is no registered current_user (possible during early init or corrupted state),
+                // treat this as a kernel fault to avoid dereferencing user pointers or attempting to stop
+                // a non-existent process which may lead to further undefined behavior.
+                if (thread_get_current_user() == nullptr) {
+                        qemu_log_printf("[pf] user-mode PF but no current_user; treating as orphaned user context, entering idle\n");
+                        if (vbe_is_initialized()) vbe_force_unlock();
+                        for(;;){ asm volatile("sti; hlt" ::: "memory"); }
+                }
                 qemu_log_printf("[pf user] cr2=0x%llx err=0x%llx P=%d W=%d U=%d RSVD=%d ID=%d RIP=0x%llx\n",
                                    cr2, err, p, wr, us, rsvd, id, regs->rip);
                 dump("user space fault", "user", regs, cr2, err, true);
@@ -235,6 +279,7 @@ static void page_fault_handler(cpu_registers_t* regs) {
                 // Уходим в idle-петлю: PIT продолжит тикать, курсор мигает
                 for(;;){ asm volatile("sti; hlt" ::: "memory"); }
         }
+kernel_fault:
     // Никакого рендера/свапа из обработчика PF
         // Иначе — kernel fault: печатаем максимум и не блокируем PIT, чтобы курсор продолжал мигать
         dump("kernel page fault", "kernel", regs, cr2, err, false);
@@ -419,6 +464,8 @@ void idt_init() {
         
         // Register detailed page fault handler
         idt_set_handler(14, page_fault_handler);
+        // Register divide-by-zero handler (#0)
+        idt_set_handler(0, div_zero_handler);
         // Register UD handler (#6)
         idt_set_handler(6, ud_fault_handler);
         // Register GP fault handler (#13)

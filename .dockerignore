@@ -1,0 +1,13 @@
+build
+.git
+.cache
+zux.iso
+*.iso
+*.img
+*.o
+*.bin
+*.tmp
+__pycache__
+*.log
+
+

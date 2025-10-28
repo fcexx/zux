@@ -302,20 +302,20 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
                 /* Ensure font metrics are known before computing console geometry */
                 vbec_init_console();
                 vbec_set_font(ibm_vga_9x16, (uint32_t)sizeof(ibm_vga_9x16), 9, 16);
-                // Разрешаем прерывания после готовности консоли, чтобы PIT начал тикать к моменту логов
-                asm volatile ("sti");
-                klog_reset_time_base();
-                klog_printf("kernel_main: kernel started with active interrupts\n");
-                klog_printf("framebuffer console %ux%u 16 colors initialized\n\n", vbe_get_cons_width(), vbe_get_cons_height());
                 extern int g_vga_force_legacy;
                 g_vga_force_legacy = 0;
                 vbe_set_present_enabled(1);
+                // Разрешаем прерывания после готовности консоли, чтобы PIT начал тикать к моменту логов
+                asm volatile ("sti");
+                klog_reset_time_base();
+                klog_printf("Booting the kernel...\n");
+                klog_printf("framebuffer console %ux%u 16 colors initialized\n\n", vbe_get_cons_width(), vbe_get_cons_height());
         } else {
                 vga_init();
                 vga_clear(7, 0);
                 asm volatile ("sti");
                 klog_reset_time_base();
-                klog_printf("kernel_main: kernel started with active interrupts\n");
+                klog_printf("\nBooting the kernel...\n\n");
                 klog_printf("vga: text console 80x25 16 colors initialized\n\n");
         }
 

@@ -1,0 +1,28 @@
+name: Cross build (Docker)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up QEMU emulation (optional)
+        uses: docker/setup-qemu-action@v2
+      - name: Build docker image with cross toolchain
+        run: |
+          docker build -t zux-cross-builder -f docker/Dockerfile .
+      - name: Run make inside container
+        run: |
+          docker run --rm -v ${{ github.workspace }}:/work -w /work zux-cross-builder bash -lc "export PATH=/opt/cross/bin:\$PATH && make -j$(nproc)"
+      - name: Upload zux.iso artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zux.iso
+          path: zux.iso
+
+

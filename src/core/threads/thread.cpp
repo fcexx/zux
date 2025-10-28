@@ -74,6 +74,12 @@ thread_t* thread_create(void (*entry)(void), const char* name) {
 
 thread_t* thread_register_user(uint64_t user_rip, uint64_t user_rsp, const char* name){
         if (thread_count >= MAX_THREADS) return NULL;
+        // Sanity checks: reject clearly invalid user contexts (entry==0 or tiny stack)
+        if (user_rip == 0 || user_rsp < 0x1000) {
+                qemu_log_printf("[thread] refusing to register user thread with invalid rip=0x%llx rsp=0x%llx\n",
+                               (unsigned long long)user_rip, (unsigned long long)user_rsp);
+                return NULL;
+        }
         thread_t* t = (thread_t*)kmalloc(sizeof(thread_t));
         if (!t) return NULL;
         memset(t, 0, sizeof(thread_t));
