@@ -41,17 +41,17 @@ $(BINDIR)/zuxImg: $(OBJECTS)
 	@echo Linking...
 	@$(LD) -n -o $@ -T linker.ld --allow-multiple-definition $(OBJECTS)
 
-hda/boot/zuxImg: $(BINDIR)/zuxImg
+iso/boot/zuxImg: $(BINDIR)/zuxImg
 	@mkdir -p $(dir $@)
 	@cp $< $@
 
-zux.iso: hda/boot/zuxImg hda/boot/grub/grub.cfg
+zux.iso: iso/boot/zuxImg iso/boot/grub/grub.cfg
 	@echo !!KERNEL DONE!!: zuxImg
 	@echo "Creating bootable ISO: $@"
 	@mkdir -p $(BUILDDIR)/isodir/boot/grub
-	@cp hda/boot/zuxImg $(BUILDDIR)/isodir/boot/zuxImg
-	@-cp hda/boot/bzbx $(BUILDDIR)/isodir/boot/bzbx
-	@cp hda/boot/grub/grub.cfg $(BUILDDIR)/isodir/boot/grub/grub.cfg
+	@cp iso/boot/zuxImg $(BUILDDIR)/isodir/boot/zuxImg
+	@-cp iso/boot/bzbx $(BUILDDIR)/isodir/boot/bzbx
+	@cp iso/boot/grub/grub.cfg $(BUILDDIR)/isodir/boot/grub/grub.cfg
 	@grub-mkrescue -o $@ $(BUILDDIR)/isodir
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.asm
@@ -83,9 +83,9 @@ clean:
 	sudo rm -rf $(BUILDDIR) zux.iso
 
 run:
-	@qemu-system-x86_64 -cdrom zux.iso -m 1024M -debugcon stdio -hda ../hda.img -boot d -vga cirrus
+	@qemu-system-x86_64 -cdrom zux.iso -m 1024M -debugcon stdio -iso ../iso.img -boot d -vga cirrus
 run-uefi:
-	@qemu-system-x86_64 -cdrom zux.iso -m 1200M -debugcon stdio -hda ../hda.img -boot d -vga virtio -bios /usr/share/OVMF/OVMF_CODE.fd
+	@qemu-system-x86_64 -cdrom zux.iso -m 1200M -debugcon stdio -iso ../iso.img -boot d -vga virtio -bios /usr/share/OVMF/OVMF_CODE.fd
 
 debug:
 	qemu-system-x86_64 -cdrom zux.iso -m 512M -s -S -debugcon stdio &

@@ -12,7 +12,7 @@ toolchains/
 *.tar
 *.tar.gz
 
-hda/bin/
+iso/bin/
 
 .DS_Store
 Thumbs.db
