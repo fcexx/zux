@@ -23,7 +23,7 @@ void pit_handler(cpu_registers_t* regs) {
     if (vbe_console_ready()) {
                 // Выполняем показ экрана только из таймера
                 vbe_cursor_tick();
-                vbe_swap();
+                if (pit_ticks % 50 == 0) vbe_swap();
         }
         
         // EOI отправляется в isr_dispatch
@@ -31,18 +31,20 @@ void pit_handler(cpu_registers_t* regs) {
 
 // Initialize PIT with default frequency (100 Hz)
 void pit_init() {
-        qemu_log_printf("Initializing PIT timer...\n");
         
         // Set default frequency (1000 Hz)
         int freq = 1000;
         pit_set_frequency(freq);
-        kprintf("pit_timer: freq at %u\n", freq);
+#ifdef K_QEMU_SERIAL_LOG
         qemu_log_printf("DEBUG: pit_frequency = %u\n", pit_frequency);
+#endif
         // Set up PIT handler for IRQ 0
         idt_set_handler(32, pit_handler); // IRQ 0 = vector 32
         
         
+#ifdef K_QEMU_SERIAL_LOG
         qemu_log_printf("PIT initialized at %u Hz\n", pit_frequency);
+#endif
 }
 
 // Set PIT frequency in Hz
@@ -62,7 +64,9 @@ void pit_set_frequency(uint32_t frequency) {
         // Set the divisor
         pit_set_divisor((uint16_t)divisor);
         
+#ifdef K_QEMU_SERIAL_LOG
         qemu_log_printf("PIT frequency set to %u Hz (divisor: %u)\n", pit_frequency, divisor);
+#endif
 }
 
 // Set PIT divisor directly

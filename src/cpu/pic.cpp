@@ -19,8 +19,6 @@ void pic_init() {
         outb(0xA1, 0x01);
         outb(0x21, 0x00);
         outb(0xA1, 0x00);
-        
-        PrintQEMU("PIC initialized\n");
 }
 
 void pic_send_eoi(uint8_t irq) {

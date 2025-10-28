@@ -268,17 +268,21 @@ void HeapAllocator::merge_blocks(heap_block_header* block) {
 bool HeapAllocator::validate_block(const heap_block_header* block) const {
         if (!block) return false;
         if (block->magic != MAGIC_NUMBER) {
+#ifdef K_QEMU_SERIAL_LOG
                 qemu_log_printf("[heap VALIDATE] bad magic: block=%p magic=0x%08x expected=0x%08x\n",
                                    block, block->magic, MAGIC_NUMBER);
                 // Dump nearby memory for diagnosis (preserve const)
                 const uint8_t* p = reinterpret_cast<const uint8_t*>(block) - 32;
                 qemu_log_printf("[heap VALIDATE] nearby: "); for (int i=0;i<96;i++) qemu_log_printf("%02x ", p[i]); qemu_log_printf("\n");
+#endif
                 return false;
         }
         // Basic range check
         const uint8_t* bptr = reinterpret_cast<const uint8_t*>(block);
         if (bptr < heap_mem_start || bptr > heap_mem_end) {
+#ifdef K_QEMU_SERIAL_LOG
                 qemu_log_printf("[heap VALIDATE] block out of range: block=%p heap_start=%p heap_end=%p\n", block, heap_mem_start, heap_mem_end);
+#endif
                 return false;
         }
         return true;
@@ -295,7 +299,9 @@ bool HeapAllocator::expand_heap(size_t additional_size) {
         void* new_memory = nullptr; // pmm_alloc_pages(pages_needed);
         
         // Temporarily disable heap expansion to avoid hangs
+#ifdef K_QEMU_SERIAL_LOG
         qemu_log_printf("[heap] expand_heap disabled: request=%zu pages=%zu\n", additional_size, pages_needed);
+#endif
         return false;
         
         // Map the new memory
@@ -722,7 +728,9 @@ bool HeapAllocator::validate_heap() const {
 
 extern "C" {
         void dump_heap_info() {
+#ifdef K_QEMU_SERIAL_LOG
                 kprintf("heap started at 0x%p, size %u, end at %p, blocks: %d\n", g_heap->heap_start, g_heap->heap_end - g_heap->heap_start, g_heap->heap_end, g_heap->stats.block_count);
+#endif
         }
 }
 

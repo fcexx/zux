@@ -12,9 +12,12 @@ mb2_start:
         ; Тег запроса видеорежима (Multiboot2 framebuffer request)
         align 8
         %ifdef K_USE_VBE
+        %ifndef K_CIRRUS_DRIVER
         dw 5                                                 ; type = 5 (framebuffer)
         %else
+        %else
         dw 0                                                 ; type = 5 (framebuffer)
+        %endif
         %endif
         dw 0                                                 ; flags (optional)
         dd 20                                                ; размер

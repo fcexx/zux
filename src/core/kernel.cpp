@@ -86,7 +86,9 @@ extern "C" uint32_t g_smbios_len;
 void parse_multiboot2(uint64_t addr) {
         struct multiboot2_tag* tag;
         
+        #ifdef K_QEMU_SERIAL_LOG
         qemu_log_printf("Parsing multiboot2 info at 0x%llx\n", (unsigned long long)addr);
+        #endif
         
         // Кандидаты модулей: приоритетно ищем по cmdline=\"bzbx\", иначе берём первый попавшийся
         uint64_t fb_mod_start = 0, fb_mod_size = 0; bool have_fallback = false; bool picked_bzbx = false;
@@ -95,19 +97,23 @@ void parse_multiboot2(uint64_t addr) {
                  tag->type != 0;
                  tag = (struct multiboot2_tag*)((uint8_t*)tag + ((tag->size + 7) & ~7))) {
                 
+#ifdef K_QEMU_SERIAL_LOG
                 qemu_log_printf("Found tag type: %u, size: %u\n", tag->type, tag->size);
+#endif
                 
                 switch (tag->type) {
                         case 8: { // Framebuffer
                                 struct multiboot2_tag_framebuffer* fb_tag = 
                                         (struct multiboot2_tag_framebuffer*)tag;
                                 
+#ifdef K_QEMU_SERIAL_LOG
                                 qemu_log_printf("Framebuffer tag found:\n");
                                 qemu_log_printf("  addr: 0x%llx\n", (unsigned long long)fb_tag->framebuffer_addr);
                                 qemu_log_printf("  width: %u\n", fb_tag->framebuffer_width);
                                 qemu_log_printf("  height: %u\n", fb_tag->framebuffer_height);
                                 qemu_log_printf("  pitch: %u\n", fb_tag->framebuffer_pitch);
                                 qemu_log_printf("  bpp: %u\n", fb_tag->framebuffer_bpp);
+#endif
                                 // Попробуем предпочесть EDID preferred mode, если GRUB его сообщил через gfxmode.
                                 // GRUB с gfxpayload=keep уже устанавливает режим; здесь просто инициализируем VBE.
                                 vbe_init((uint64_t)fb_tag->framebuffer_addr,
@@ -141,8 +147,10 @@ void parse_multiboot2(uint64_t addr) {
                                 auto* s = (multiboot2_tag_smbios*)tag;
                                 g_smbios_addr = s->table_phys;
                                 g_smbios_len  = s->size - sizeof(multiboot2_tag_smbios);
+#ifdef K_QEMU_SERIAL_LOG
                                 qemu_log_printf("Found SMBIOS tag addr=0x%llx len=%u\n",
                                         (unsigned long long)g_smbios_addr, g_smbios_len);
+#endif
                                 break;
                         }
                         case 20: { // EFI 64 system table
@@ -153,7 +161,9 @@ void parse_multiboot2(uint64_t addr) {
                                     if (guid_eq(&ct->VendorGuid,&SMBIOS_GUID) || guid_eq(&ct->VendorGuid,&SMBIOS3_GUID)){
                                         g_smbios_addr = (uint64_t)(uintptr_t)ct->VendorTable;
                                         g_smbios_len = 0x10000; // map first 64KB; exact length parsed later
+#ifdef K_QEMU_SERIAL_LOG
                                         qemu_log_printf("EFI: found SMBIOS table @0x%llx\n", (unsigned long long)g_smbios_addr);
+#endif
                                     }
                                 }
                                 break;
@@ -284,11 +294,31 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
 
         // Сначала инициализируем heap, затем консоль (для VBE backbuffer)
         heap_init();
-        asm volatile ("sti");
-        klog_reset_time_base();
-        vga_init();
-        vga_clear(7, 0);
-        klog_printf("vga: text console 80x25 16 colors initialized\n\n");
+
+        // disable frame showing until early initialization is complete
+        if (vbe_is_initialized()) {
+                // disable frame showing until early initialization is complete
+                vbe_set_present_enabled(0);
+                /* Ensure font metrics are known before computing console geometry */
+                vbec_init_console();
+                vbec_set_font(ibm_vga_9x16, (uint32_t)sizeof(ibm_vga_9x16), 9, 16);
+                // Разрешаем прерывания после готовности консоли, чтобы PIT начал тикать к моменту логов
+                asm volatile ("sti");
+                klog_reset_time_base();
+                klog_printf("kernel_main: kernel started with active interrupts\n");
+                klog_printf("framebuffer console %ux%u 16 colors initialized\n\n", vbe_get_cons_width(), vbe_get_cons_height());
+                extern int g_vga_force_legacy;
+                g_vga_force_legacy = 0;
+                vbe_set_present_enabled(1);
+        } else {
+                vga_init();
+                vga_clear(7, 0);
+                asm volatile ("sti");
+                klog_reset_time_base();
+                klog_printf("kernel_main: kernel started with active interrupts\n");
+                klog_printf("vga: text console 80x25 16 colors initialized\n\n");
+        }
+
         ps2_keyboard_init();
         klog_printf("%s kernel version %s\n", ZUX_NAME, ZUX_VERSION_FULL);
         
@@ -297,11 +327,9 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
         // swap экрана выполняется только из PIT
 
         ata_init();
-        // Если дисков нет — не ждём ничего от FAT32, работаем с initramfs
         iothread_init();
 
         gdt_init();
-        qemu_log_printf("dewfe");
         void* kstack = kmalloc_aligned(16384, 4096);
         if (!kstack) {
                 // try plain kmalloc and align the result manually to 4KB
@@ -310,25 +338,33 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
                         uint64_t a = (uint64_t)raw;
                         uint64_t aligned = (a + 4095ULL) & ~0xFFFULL;
                         kstack = (void*)aligned;
+#ifdef K_QEMU_SERIAL_LOG
                         qemu_log_printf("[tss] kmalloc_aligned fallback: raw=%p aligned=%p\n", raw, kstack);
+#endif
                 } else {
                         // Dump heap info to help diagnose why allocation failed
                         dump_heap_info();
                         // Also dump recent allocation history for context
+#ifdef K_QEMU_SERIAL_LOG
                         extern void dump_alloc_history();
                         dump_alloc_history();
                         klog_printf("fatal: kmalloc_aligned failed; halted\n");
+#endif
                         for (;;);
                 }
         }
         uint64_t kstack_top = (uint64_t)kstack + 16384;
+#ifdef K_QEMU_SERIAL_LOG
         qemu_log_printf("[tss] kstack=%p kstack_top=0x%llx\n", kstack, (unsigned long long)kstack_top);
+#endif
         if (kstack) memset(kstack, 0xCD, 16384);
         thread_t* cur = thread_current();
         if (cur) {
                 cur->kernel_stack = kstack_top;
         } else {
-                PrintQEMU("[tss] WARN: thread_current()==nullptr\n");
+#ifdef K_QEMU_SERIAL_LOG
+                qemu_log_printf("[tss] WARN: thread_current()==nullptr\n");
+#endif
         }
         tss_set_rsp0(kstack_top);
         // Выделим отдельный IST стек для #DF (достаточно 8 КБ)
@@ -338,14 +374,19 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
                 uint64_t df_top = (uint64_t)df_stack + 8192;
                 tss_set_ist(1, df_top);
         }
+#ifdef K_QEMU_SERIAL_LOG
         qemu_log_printf("[tss] rsp0 set to 0x%llx\n", (unsigned long long)kstack_top);
+#endif
         // Обновим стек для входа SYSCALL (используется syscall_entry.S)
         extern uint64_t syscall_kernel_rsp0;
         syscall_kernel_rsp0 = kstack_top;
         dmi_scan();
         syscall_init();
-        PrintQEMU("[syscall] init x86_64 SYSCALL...\n");
+#ifdef K_QEMU_SERIAL_LOG
+        qemu_log_printf("[syscall] init x86_64 SYSCALL...\n");
+#endif
         syscall_x64_init();
+
         klog_printf("syscalls: ready to fire\n");
         klog_printf("\n");
         // Прерывания включим после монтирования VFS, чтобы исключить ранние IRQ во время парсинга cpio
@@ -359,8 +400,10 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
                 if (mb_end > mb_base) {
                         uint64_t sz = mb_end - mb_base;
                         paging_map_range(mb_base, mb_base, sz, PAGE_PRESENT | PAGE_WRITABLE);
+#ifdef K_QEMU_SERIAL_LOG
                         qemu_log_printf("[cpio map] mapped module @0x%llx..0x%llx (%llu KB)\n",
                                    (unsigned long long)mb_base, (unsigned long long)mb_end, (unsigned long long)(sz/1024ULL));
+#endif
                 }
         }
         klog_printf("\n");
@@ -384,11 +427,9 @@ extern "C" void kernel_main(uint32_t multiboot2_magic, uint64_t multiboot2_info_
         // Запускаем в самом конце ранней инициализации, после включения прерываний, консоли и VFS
         pci_init();
         // Initialize Cirrus driver now that PCI is up
-        cirrus_init();
-        dmi_scan();
-        if (vbe_is_initialized()) vbe_set_present_enabled(1);
 
 #ifdef K_CIRRUS_DRIVER
+        cirrus_init();
         // If Cirrus was detected, switch console over now.
         if (cirrus_console_ready()) {
                 klog_printf("vga: switching console to cirrus framebuffer\n");

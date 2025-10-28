@@ -40,9 +40,14 @@ uint8_t pci_config_read8(uint8_t bus, uint8_t device, uint8_t function, uint8_t 
         return pci_read8(bus, device, function, offset);
 }
 
+char path[64] = "/dev/pci/";
+char buf[128] = "";
+char num[16];
+char t[16];
+
 static void publish_pci_device(const pci_device_info_t* info, int index){
         // Лог в dmesg стиле
-        klog_printf("pci: %02x:%02x.%x vendor=%04x device=%04x class=%02x subclass=%02x prog_if=%02x header=%02x",
+        klog_printf("PCI: %02x:%02x.%x vendor=%04x device=%04x class=%02x subclass=%02x prog_if=%02x header=%02x",
                     info->bus, info->device, info->function,
                     info->vendor_id, info->device_id,
                     info->class_code, info->subclass, info->prog_if,
@@ -50,17 +55,11 @@ static void publish_pci_device(const pci_device_info_t* info, int index){
 
         // Создать узел /dev/pci/<index>
         vfs_dev_create_dir("/dev/pci");
-        char path[64];
-        char buf[128];
         // имя вида /dev/pci/000
         int n = index;
-        path[0] = '\0';
-        strcat(path, "/dev/pci/");
-        char num[16];
-        num[0]='\0';
         // простая десятичная запись индекса
         {
-                char t[16]; int i=0; if (n==0) t[i++]='0'; else { int x=n; while (x>0){ t[i++] = (char)('0' + (x%10)); x/=10; } } int j=0; while(i>0){ num[j++]=t[--i]; } num[j]='\0';
+                int i=0; if (n==0) t[i++]='0'; else { int x=n; while (x>0){ t[i++] = (char)('0' + (x%10)); x/=10; } } int j=0; while(i>0){ num[j++]=t[--i]; } num[j]='\0';
         }
         strcat(path, num);
         // содержимое файла — строка с полями
@@ -123,9 +122,9 @@ void pci_init(void){
         // vfs_dev_create_dir("/dev/pci");
         // asm volatile("push %0; popfq" :: "r"(flags) : "memory", "cc");
 
-        klog_printf("pci: Scanning buses...");
+        klog_printf("PCI: Scanning buses...");
         scan_bus();
-        klog_printf("pci: Scan done.");
+        klog_printf("PCI: Scan done.");
 }
 
 

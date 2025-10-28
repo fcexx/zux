@@ -1,5 +1,6 @@
 #include <vbetty.h>
 #include <vga.h>
+#include <debug.h>
 #include <vbe.h>
 #include <spinlock.h>
 #include <stdarg.h>
@@ -24,8 +25,8 @@ extern int g_vga_force_legacy;
 spinlock_t vga_printf_lock = {0};
 
 static inline void vga_newline() {
-        uint32_t x, y;
-        vga_get_cursor(&x, &y);
+        uint32_t x = 0, y = 0;
+        if (vbe_console_ready()) vbec_get_cursor(&x, &y); else vga_get_cursor(&x, &y);
         x = 0;
     if (++y >= cons_h) {
         if (g_vga_force_legacy) vga_scroll_up(bg_idx);
@@ -53,7 +54,7 @@ static inline void klog_linebuf_push(char c){
 static inline void vga_putc(char c) {
         // always synchronize with driver cursor state
         uint32_t local_x = 0, local_y = 0;
-        vga_get_cursor(&local_x, &local_y);
+        if (vbe_console_ready()) vbec_get_cursor(&local_x, &local_y); else vga_get_cursor(&local_x, &local_y);
 
         if (c == '\n') { vga_newline(); extern void vfs_klog_append(const char*, unsigned long); vfs_klog_append("\n", 1); return; }
 
@@ -160,6 +161,10 @@ extern "C" int kprintf(const char* fmt, ...) {
         cons_w = vbec_get_width();
         cons_h = vbec_get_height();
         vbec_get_cursor(&cur_x, &cur_y);
+        /* Ensure cursor sane on first use of VBE console */
+        if (cur_x >= cons_w || cur_y >= cons_h) {
+            cur_x = 0; cur_y = 0; vbec_set_cursor(0,0);
+        }
     } else {
                 cons_w = vga_get_width();
                 cons_h = vga_get_height();

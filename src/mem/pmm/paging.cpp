@@ -15,7 +15,9 @@ static size_t pt_pool_offset = 0;
 
 static inline page_table_t* alloc_page_table_from_pool() {
         if (pt_pool_offset + 4096 > sizeof(pt_pool)) {
-                PrintQEMU("[paging] PT pool exhausted\n");
+#ifdef K_QEMU_SERIAL_LOG
+                qemu_log_printf("[paging] PT pool exhausted\n");
+#endif
                 return nullptr;
         }
         page_table_t* t = reinterpret_cast<page_table_t*>(pt_pool + pt_pool_offset);
@@ -87,7 +89,9 @@ static void ensure_user_parent_entries(uint64_t virtual_addr) {
 }
 
 void paging_init() {
-        PrintQEMU("Initializing paging...\n");
+#ifdef K_QEMU_SERIAL_LOG
+        qemu_log_printf("Initializing paging...\n");
+#endif
         
         // Clear L4 and reset pool
         clear_page_table(&page_table_l4);
@@ -111,7 +115,9 @@ void paging_init() {
                 uint64_t fb_base = fb_addr & ~0xFFFFFULL; // выровняем вниз по 1MB
                 uint64_t map_size = (fb_size + 0xFFFFFULL) & ~0xFFFFFULL;
                 paging_map_range(fb_base, fb_base, map_size, PAGE_PRESENT | PAGE_WRITABLE);
+#ifdef K_QEMU_SERIAL_LOG
                 qemu_log_printf("[paging] mapped framebuffer at 0x%llx size=0x%llx\n", (unsigned long long)fb_base, (unsigned long long)map_size);
+#endif
                 }
         }
 
@@ -122,7 +128,9 @@ void paging_init() {
                 uint64_t vga_phys = 0x000B8000ULL;
                 // Allow user-mode processes to access the VGA text buffer (some tests write from userland)
                 paging_map_range(vga_virt, vga_phys, 0x1000ULL, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+#ifdef K_QEMU_SERIAL_LOG
                 qemu_log_printf("[paging] mapped VGA text buffer virt=0x%llx -> phys=0x%llx\n", (unsigned long long)vga_virt, (unsigned long long)vga_phys);
+#endif
         }
 
         // Map SMBIOS table if present (for UEFI)
@@ -131,14 +139,18 @@ void paging_init() {
                 uint64_t base = g_smbios_addr & ~0xFFFULL;
                 uint64_t sz = ((g_smbios_addr + g_smbios_len) - base + 0xFFFULL) & ~0xFFFULL;
                 paging_map_range(base, base, sz, PAGE_PRESENT);
+#ifdef K_QEMU_SERIAL_LOG
                 qemu_log_printf("[paging] mapped SMBIOS at 0x%llx size=0x%llx\n",
                         (unsigned long long)base, (unsigned long long)sz);
+#endif
         }
         
         // Load CR3
         paging_load_cr3((uint64_t)&page_table_l4);
         
-        PrintQEMU("Paging initialized\n");
+#ifdef K_QEMU_SERIAL_LOG
+        qemu_log_printf("Paging initialized\n");
+#endif
 }
 
 void paging_map_page(uint64_t virtual_addr, uint64_t physical_addr, uint64_t flags) {
@@ -150,8 +162,10 @@ void paging_map_page(uint64_t virtual_addr, uint64_t physical_addr, uint64_t fla
                 *entry = (physical_addr & PAGE_MASK) | flags;
                 asm volatile("invlpg (%0)" : : "r" (virtual_addr) : "memory");
         } else {
-                PrintQEMU("Failed to map page: ");
+#ifdef K_QEMU_SERIAL_LOG
+                qemu_log_printf("Failed to map page: ");
                 qemu_log_printf("0x%x -> 0x%x\n", virtual_addr, physical_addr);
+#endif
         }
 }
 

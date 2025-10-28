@@ -98,8 +98,10 @@ int vfs_mount_from_cpio(const void* data, unsigned long size){
                 bool magic_ok = (p[0]=='0' && p[1]=='7' && p[2]=='0' && p[3]=='7' && p[4]=='0' && p[5]=='1');
                 if (!magic_ok){
                         // печать первых 6 байт на случай рассинхронизации
+#ifdef K_QEMU_SERIAL_LOG
                         qemu_log_printf("[vfs] bad magic at +%lu: %02x %02x %02x %02x %02x %02x\n",
                                            (unsigned long)(p - p0), p[0],p[1],p[2],p[3],p[4],p[5]);
+#endif
                         break;
                 }
                 const char* hdr = (const char*)p;
@@ -120,8 +122,10 @@ int vfs_mount_from_cpio(const void* data, unsigned long size){
                 // Throttled header log: print every 128 entries or when file is large
                 if ((vfs_verbose_counter++ & 127) == 0 || filesz > 0x100000ULL) {
                         // Print only safe-bounded name
+#ifdef K_QEMU_SERIAL_LOG
                         qemu_log_printf("[vfs] hdr@+%lu namesz=%lu filesz=%lu mode=%08lx name='%s'\n",
                                            (unsigned long)(hdrStart - p0), copy_n, filesz, mode, name);
+#endif
                 }
                 // move past name (including trailing NUL), then align p to 4 bytes
                 p += namesz;
@@ -161,14 +165,20 @@ int vfs_mount_from_cpio(const void* data, unsigned long size){
                                                 size_t L = strlen(exist->link_target);
                                                 while (L && (exist->link_target[L-1]=='\n' || exist->link_target[L-1]=='\0' || exist->link_target[L-1]=='\r')) { exist->link_target[L-1]=0; L--; }
                                                 // Throttle symlink logs to avoid flooding
+#ifdef K_QEMU_SERIAL_LOG
                                                 if ((vfs_verbose_counter & 127) == 0 || filesz > 1024) qemu_log_printf("[vfs] symlink: path=%s target='%s' filesz=%lu\n", pathbuf, exist->link_target, filesz);
+#endif
                                         } else if (filesz){
                                                 // Всегда копируем в heap, чтобы не держать ссылки на модуль Multiboot (может быть за пределами identity-map)
+#ifdef K_QEMU_SERIAL_LOG
                                                 qemu_log_printf("[vfs] file: path=%s filesz=%lu\n", pathbuf, filesz);
+#endif
                                                 exist->size = filesz;
                                                 exist->data = (uint8_t*)kmalloc(filesz);
                                                 if (!exist->data) {
+#ifdef K_QEMU_SERIAL_LOG
                                                         qemu_log_printf("[vfs] kmalloc failed for %s size=%lu, truncating to available\n", pathbuf, filesz);
+#endif
                                                         size_t avail = (size_t)(end - (const uint8_t*)p);
                                                         if (avail > (size_t)filesz) avail = (size_t)filesz;
                                                         exist->data = (uint8_t*)kmalloc(avail);
@@ -177,8 +187,10 @@ int vfs_mount_from_cpio(const void* data, unsigned long size){
                                                         // Ensure source pointer is within archive bounds before memcpy
                                                         size_t avail = (size_t)filesz;
                                                         if ((const uint8_t*)p + filesz > end) {
+#ifdef K_QEMU_SERIAL_LOG
                                                                 qemu_log_printf("[vfs] WARNING: cpio entry truncated for %s (filesz=%lu, available=%lu)\n",
                                                                                    pathbuf, filesz, (unsigned long)(end - (const uint8_t*)p));
+#endif
                                                                 avail = (size_t)(end - (const uint8_t*)p);
                                                                 if (avail > (size_t)filesz) avail = (size_t)filesz;
                                                                 exist->size = avail;
@@ -189,10 +201,16 @@ int vfs_mount_from_cpio(const void* data, unsigned long size){
                                 }
                                 if (filesz > 0x100000ULL) {
                                         // Large file - always log
+#ifdef K_QEMU_SERIAL_LOG
                                         qemu_log_printf("[vfs] add %s %s size=%lu\n", pathbuf, is_dir?"dir":"file", filesz);
+#endif
+                                        klog_printf("cpio: WARNING: large file %s size=%lu\n", pathbuf, filesz);
                                 } else {
                                         // Throttled add log
+#ifdef K_QEMU_SERIAL_LOG
                                         if ((vfs_verbose_counter & 127) == 0) qemu_log_printf("[vfs] add %s %s size=%lu\n", pathbuf, is_dir?"dir":"file", filesz);
+#endif
+
                                 }
                                 break;
                         } else {
@@ -209,7 +227,9 @@ int vfs_mount_from_cpio(const void* data, unsigned long size){
                 p = (const uint8_t*)(((size_t)p + 3u) & ~(size_t)3u);
                 // No yields during mount to avoid reentrancy in early boot
         }
+#ifdef K_QEMU_SERIAL_LOG
         qemu_log_printf("[vfs] mounted cpio with root=%p\n", (void*)vfs_root);
+#endif
         return 0;
 }
 
@@ -281,7 +301,9 @@ extern "C" int vfs_dev_create_dir(const char* path){
         // only absolute paths
         if (path[0] != '/') return -1;
         // find parent
-        char temp[512]; strncpy(temp, path, sizeof(temp)-1); temp[sizeof(temp)-1]='\0';
+        char *temp = (char*)kmalloc(512);
+        if (!temp) return -1;
+        strncpy(temp, path, sizeof(temp)-1); temp[sizeof(temp)-1]='\0';
         // strip trailing '/'
         size_t L = strlen(temp); if (L>1 && temp[L-1]=='/') temp[L-1]='\0';
         // locate parent directory
@@ -295,6 +317,7 @@ extern "C" int vfs_dev_create_dir(const char* path){
                 VfsNode* cur = vfs_root;
                 VfsNode* ch = cur->children; while (ch && strcmp(ch->name, name)!=0) ch=ch->next;
                 if (!ch) (void)vfs_make_child(cur, name, true);
+                kfree(temp);
                 return 0;
         } else {
                 *last = '\0';
@@ -304,6 +327,7 @@ extern "C" int vfs_dev_create_dir(const char* path){
                 if (!parent || !(parent->attr & FS_ATTR_DIRECTORY)) return -1;
                 VfsNode* ch = parent->children; while (ch && strcmp(ch->name, name)!=0) ch=ch->next;
                 if (!ch) (void)vfs_make_child(parent, name, true);
+                kfree(temp);
                 return 0;
         }
 }
@@ -311,15 +335,20 @@ extern "C" int vfs_dev_create_dir(const char* path){
 extern "C" int vfs_dev_create_file(const char* path, const void* data, unsigned long size){
         if (!path || !vfs_root) return -1;
         if (path[0] != '/') return -1;
-        char temp[512]; strncpy(temp, path, sizeof(temp)-1); temp[sizeof(temp)-1]='\0';
+        char *temp = (char*)kmalloc(512);
+        if (!temp) return -1;
+        strncpy(temp, path, sizeof(temp)-1); temp[sizeof(temp)-1]='\0';
         size_t L = strlen(temp); if (L>1 && temp[L-1]=='/') temp[L-1]='\0';
         char* last = strrchr(temp, '/'); if (!last) return -1;
-        char name[256];
+        char *name = (char*)kmalloc(256);
+        if (!name) return -1;
         if (last == temp){ strcpy(name, temp+1); VfsNode* cur=vfs_root; VfsNode* ch=cur->children; while (ch&&strcmp(ch->name,name)!=0) ch=ch->next; if (!ch) ch=vfs_make_child(cur,name,false); if (ch){ if (size){ ch->data=(uint8_t*)kmalloc(size); if (ch->data && data) memcpy(ch->data,data,(size_t)size); ch->size=size; ch->capacity=size; } } return 0; }
         *last='\0'; const char* base=last+1; strncpy(name, base, sizeof(name)-1); name[sizeof(name)-1]='\0';
         VfsNode* parent = vfs_lookup_path(temp); if (!parent || !(parent->attr & FS_ATTR_DIRECTORY)) return -1;
         VfsNode* ch = parent->children; while (ch && strcmp(ch->name, name)!=0) ch=ch->next;
         if (!ch) ch = vfs_make_child(parent, name, false);
         if (ch){ if (size){ ch->data=(uint8_t*)kmalloc(size); if (ch->data && data) memcpy(ch->data,data,(size_t)size); ch->size=size; ch->capacity=size; } }
+        kfree(temp);
+        kfree(name);
         return 0;
 }

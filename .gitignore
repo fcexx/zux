@@ -1,4 +1,3 @@
-# Build artifacts
 build/
 *.o
 *.obj
@@ -6,26 +5,15 @@ build/
 *.bin
 *.map
 
-# Disk images and VM artifacts
-zux.img
-zux.iso
-zux.vmdk
-zux.vmdk.lck/
-*.img
-*.vmdk
+*.iso
 
-# Toolchains and archives
 toolchains/
 *.tgz
 *.tar
 *.tar.gz
 
-# Local binaries copied into hda (runtime-only)
 hda/bin/
-# Keep kernel image in repo if you want; comment next line to track it
-# hda/boot/zuxImg
 
-# Editor/OS junk
 .DS_Store
 Thumbs.db
 *.swp

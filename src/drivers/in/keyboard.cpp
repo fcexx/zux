@@ -90,9 +90,6 @@ static char get_from_buffer() {
                 c = keyboard_buffer[buffer_head];
                 buffer_head = (buffer_head + 1) % KEYBOARD_BUFFER_SIZE;
                 buffer_count--;
-                // qemu_log_printf("BUFFER: got '%c', count=%d\n", c, buffer_count);
-        } else {
-                qemu_log_printf("BUFFER: empty\n");
         }
         
         release(&keyboard_lock);
@@ -103,7 +100,6 @@ static char get_from_buffer() {
 // Обработчик прерывания клавиатуры
 extern "C" void keyboard_handler(cpu_registers_t* regs) {
         uint8_t scancode = inb(0x60);
-        //qemu_log_printf("[KEYBOARD] scancode=0x%02x\n", scancode);
         
         // Обрабатываем только нажатие клавиш (не отпускание)
         if (scancode & 0x80) {
@@ -202,7 +198,9 @@ void ps2_keyboard_init() {
         // Устанавливаем обработчик прерывания
         idt_set_handler(33, keyboard_handler);
         
-        PrintQEMU("PS/2 keyboard initialized\n");
+#ifdef K_QEMU_SERIAL_LOG
+        qemu_log_printf("PS/2 keyboard initialized\n");
+#endif
 }
 
 // Получить символ (блокирующая функция, как в Unix)

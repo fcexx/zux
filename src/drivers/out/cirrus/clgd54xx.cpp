@@ -121,7 +121,7 @@ void cirrus_put_cell(uint32_t x, uint32_t y, char c, uint8_t fg, uint8_t bg){
     if (!g_ready) return;
     if (x >= 80 || y >= 25) return;
     // render 8x16 from font8x16sun into framebuffer assuming 320x200/8bpp or larger
-    const uint16_t* glyph = font8x16sun[(uint8_t)c];
+    const uint16_t* glyph = ibm_vga_9x16[(uint8_t)c];
     uint32_t px = x * 8;
     uint32_t py = y * 16;
     for (uint32_t row = 0; row < 16; ++row){

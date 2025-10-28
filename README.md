@@ -10,4 +10,6 @@ boot
 
 Currently, the Zux kernel supports amd64 architecture, but it will provide support for other hardware architecture in the future.
 
+**Maybe this is not a kernel, this is an operating system, because of grub loader...**
+
 *For more information and to reach developers contact the Telegram channel: https://t.me/waruxx.*

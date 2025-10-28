@@ -65,8 +65,10 @@ void vbe_init(uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch, ui
                 g_fb_initialized = false;
                 g_frontbuffer = nullptr;
                 // backbuffer может остаться невыделенным; консоль VGA возьмёт управление выводом
+#ifdef K_QEMU_SERIAL_LOG
                 qemu_log_printf("[vbe] disabled: VGA text mode detected (addr=0x%llx %ux%u pitch=%u bpp=%u)\n",
                            (unsigned long long)addr, (unsigned)width, (unsigned)height, (unsigned)pitch, (unsigned)bpp);
+#endif
                 return;
         }
         // Разрешим 16/24/32 bpp. Для 16 bpp используем RGB565 при выводе
@@ -283,12 +285,22 @@ void vbec_init_console() {
                 if (g_backbuffer && g_backbuffer != (uint32_t*)g_frontbuffer) {
             for (size_t i = 0; i < (bytes / 4); ++i) g_backbuffer[i] = 0x00000000U;
         }
+#ifdef K_QEMU_SERIAL_LOG
+                qemu_log_printf("[vbe] vbec_init_console: fb_addr=%p front=%p back=%p bytes=%zu bpp=%u\n",
+                               (void*)g_fb_addr, (void*)g_frontbuffer, (void*)g_backbuffer, bytes, (unsigned)g_fb_bpp);
+#endif
     }
         // 9x16 font grid and palette
-        if (g_fb_width % g_cell_w == 0) g_cons_w = g_fb_width / g_cell_w;
-        else g_cons_w = g_fb_width / g_cell_w + 1;
-        
+        /* Compute console width as ceiling(fb_width / cell_w) so partial cells
+           on the right are still addressable; clamp height with floor. */
+        g_cons_w = (g_fb_width + g_cell_w - 1) / g_cell_w;
+        if (g_cons_w == 0) g_cons_w = 1;
+
         g_cons_h = g_fb_height / g_cell_h;
+#ifdef K_QEMU_SERIAL_LOG
+        qemu_log_printf("[vbe] vbec_init_console: computed cons_w=%u cons_h=%u cell_w=%u cell_h=%u fb_w=%u fb_h=%u pitch=%u\n",
+                       g_cons_w, g_cons_h, g_cell_w, g_cell_h, g_fb_width, g_fb_height, g_fb_pitch);
+#endif
         g_palette[0]=0xFF000000; g_palette[1]=0xFF0000AA; g_palette[2]=0xFF00AA00; g_palette[3]=0xFF00AAAA;
         g_palette[4]=0xFFAA0000; g_palette[5]=0xFFAA00AA; g_palette[6]=0xFFAA5500; g_palette[7]=0xFFAAAAAA;
         g_palette[8]=0xFF555555; g_palette[9]=0xFF5555FF; g_palette[10]=0xFF55FF55; g_palette[11]=0xFF55FFFF;
@@ -308,6 +320,10 @@ void vbec_set_bg(uint8_t idx) { (void)idx; }
 static void vbec_draw_char(uint32_t cx, uint32_t cy, char c, uint32_t fg, uint32_t bg) {
         uint64_t irqf = vbe_enter_cs();
         uint32_t x0 = cx * g_cell_w; uint32_t y0 = cy * g_cell_h;
+        static int vbec_diag_shown = 0;
+        if (!vbec_diag_shown) {
+                vbec_diag_shown = 1;
+        }
         unsigned int glyph_index = (unsigned char)c;
         if (g_font == nullptr || g_font_rows == 0 || g_font_glyphs == 0) {
                 /* nothing to draw */
@@ -318,6 +334,7 @@ static void vbec_draw_char(uint32_t cx, uint32_t cy, char c, uint32_t fg, uint32
         uint16_t *glyph = g_font + (size_t)glyph_index * (size_t)g_font_rows;
         uint32_t rows_to_draw = g_cell_h;
         if (rows_to_draw > g_font_rows) rows_to_draw = g_font_rows;
+        static int vbec_diag_count = 0;
         for (uint32_t row = 0; row < rows_to_draw; ++row) {
                 uint16_t bits = glyph[row];
                 uint32_t y_phys = (uint32_t)((y0 + row + g_scroll_px_off) % g_fb_height);
@@ -329,9 +346,8 @@ static void vbec_draw_char(uint32_t cx, uint32_t cy, char c, uint32_t fg, uint32
                 uint32_t safe_w = g_cell_w;
                 if (base_index + safe_w > max_index) safe_w = (uint32_t)(max_index - base_index);
                 for (uint32_t col = 0; col < safe_w; ++col) {
-                        // Каждый ряд шрифта использует младшие 9 бит: выбираем бит 8..0
                         bool on = (bits & (1u << (g_cell_w - 1 - col))) != 0;
-            dst[col] = on ? fg : bg;
+                        dst[col] = on ? fg : bg;
         }
     }
         // mark dirty rect for this cell
@@ -367,10 +383,38 @@ void vbec_scroll_up(uint8_t bg_idx) {
         vbe_leave_cs(irqf);
 }
 
-void vbec_set_cursor(uint32_t x, uint32_t y) { g_cursor_x = x; g_cursor_y = y; }
-void vbec_get_cursor(uint32_t* x, uint32_t* y) { if (x) *x = g_cursor_x; if (y) *y = g_cursor_y; }
-uint32_t vbec_get_width() { return g_cons_w ? g_cons_w : (g_fb_width / 8); }
-uint32_t vbec_get_height() { return g_cons_h ? g_cons_h : (g_fb_height / 16); }
+void vbec_set_cursor(uint32_t x, uint32_t y) {
+    /* Normalize and clamp cursor to console geometry. This prevents a runaway
+       cursor (e.g. x==cons_w) from staying at the last column and causing
+       all output to be placed into the same cell. */
+    uint32_t cw = vbec_get_width();
+    uint32_t ch = vbec_get_height();
+    uint32_t nx = x;
+    uint32_t ny = y;
+    if (cw == 0 || ch == 0) {
+        /* nothing known yet - set directly */
+        //qemu_log_printf("[vbe] vbec_set_cursor (no geometry) -> (%u,%u)\n", x, y);
+        g_cursor_x = x; g_cursor_y = y; return;
+    }
+    /* Wrap if x beyond width */
+    if (nx >= cw) {
+        ny += nx / cw;
+        nx = nx % cw;
+    }
+    /* If y beyond height, scroll so cursor is visible at bottom */
+    if (ny >= ch) {
+        uint32_t lines = ny - (ch - 1);
+        for (uint32_t i = 0; i < lines; ++i) vbec_scroll_up(0);
+        ny = ch - 1;
+    }
+    g_cursor_x = nx; g_cursor_y = ny;
+}
+void vbec_get_cursor(uint32_t* x, uint32_t* y) {
+    if (x) *x = g_cursor_x;
+    if (y) *y = g_cursor_y;
+}
+uint32_t vbec_get_width() { return g_cons_w ? g_cons_w : (g_fb_width / (g_cell_w ? g_cell_w : 8)); }
+uint32_t vbec_get_height() { return g_cons_h ? g_cons_h : (g_fb_height / (g_cell_h ? g_cell_h : 16)); }
 
 // Blink cursor over backbuffer. Always toggles regardless of userland faults,
 // as PIT continues ticking. We invert a small 8x2 bar at the bottom of the cell.
@@ -453,6 +497,8 @@ int vbec_set_font(const void* data, uint32_t data_size, uint8_t width, uint8_t h
         g_font = buf;
         g_font_glyphs = (uint32_t)glyphs;
         g_font_rows = (uint32_t)rows;
+        /* Respect requested font width (allow 9x16). Drawing code clamps per-row
+           writes to framebuffer width so partial cells are handled safely. */
         g_cell_w = width;
         g_cell_h = height;
         return 0;
